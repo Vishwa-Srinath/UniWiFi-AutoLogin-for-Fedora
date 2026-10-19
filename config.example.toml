@@ -1,0 +1,50 @@
+# UniWiFi AutoLogin Configuration Template
+# Copy this file to ~/.config/uniwifi/config.toml and adjust to your campus settings.
+
+[general]
+# List of Wi-Fi SSIDs on which this daemon should activate.
+# NEVER leave this empty or wildcarded to prevent transmitting credentials to rogue hotspots.
+ssids = ["Uni-WiFi", "Uni-Guest"]
+
+# Plain HTTP URL to probe for connectivity (captive portals intercept plain HTTP cleanly)
+check_url = "http://fedoraproject.org/static/hotspot.txt"
+
+# Expected body string when genuine internet connectivity is present
+check_expect = "OK"
+
+# Seconds to wait after system resume before asking NetworkManager to re-check connectivity
+resume_delay_seconds = 3
+
+# Maximum login attempts before backing off and alerting
+max_attempts = 5
+
+# Exponential backoff base interval in seconds
+backoff_base_seconds = 5
+
+# Send desktop notifications via libnotify (notify-send) on success or failure
+notify = true
+
+# Whitelist allowed portal hostnames to prevent Evil Twin / rogue redirect attacks
+allowed_hosts = ["portal.youruni.edu"]
+
+[portal]
+# Mode can be "form" (auto-detect login form fields) or "custom" (explicit field names)
+mode = "form"
+
+# Parameters below are utilized when mode = "custom" or for fallback targeting
+login_url = "https://portal.youruni.edu/login"
+method = "POST"
+username_field = "username"
+password_field = "password"
+
+# Extra static payload parameters required by the portal form
+extra_fields = { buttonClicked = "4", redirect_url = "" }
+
+# Optional substring to check in the login HTTP response body
+success_contains = "logged in"
+
+# Automatically extract hidden form tokens (such as CSRF tokens or dynamic session values)
+scrape_hidden_fields = true
+
+# Verify SSL/TLS certificates when submitting credentials
+verify_tls = true
