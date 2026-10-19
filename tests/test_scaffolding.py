@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import uniwifi
 from typer.testing import CliRunner
+
+import uniwifi
 from uniwifi.cli import app
 
 runner = CliRunner()

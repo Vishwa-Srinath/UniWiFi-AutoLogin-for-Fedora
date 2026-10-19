@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import typer
+
 from . import __version__
 
 app = typer.Typer(
