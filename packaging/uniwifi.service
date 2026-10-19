@@ -1,0 +1,20 @@
+[Unit]
+Description=University Wi-Fi auto-login daemon for Fedora
+Documentation=https://github.com/Vishwa-Srinath/UniWiFi-AutoLogin-for-Fedora
+After=network-online.target graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/uniwifi run
+Restart=on-failure
+RestartSec=10
+
+# Security hardening directives
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
