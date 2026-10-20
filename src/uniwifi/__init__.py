@@ -7,17 +7,25 @@ after every sleep/resume, using credentials stored securely in your system keyri
 from __future__ import annotations
 
 from .recon import (
+    STANDARD_PROBE_URLS,
     ConnectionInfo,
+    PortalProbeResult,
     diagnose_network_security,
     get_active_wifi_connections,
     inspect_connection,
+    trace_portal,
+    trace_portal_async,
 )
 
 __version__ = "0.1.0"
 __all__ = [
     "ConnectionInfo",
+    "PortalProbeResult",
+    "STANDARD_PROBE_URLS",
     "__version__",
     "diagnose_network_security",
     "get_active_wifi_connections",
     "inspect_connection",
+    "trace_portal",
+    "trace_portal_async",
 ]

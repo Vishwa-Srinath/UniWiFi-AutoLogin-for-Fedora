@@ -6,11 +6,14 @@ authenticates via 802.1X (Type A) or web captive portal (Type B).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+
+import httpx
 
 
 @dataclass(frozen=True)
@@ -196,3 +199,108 @@ def get_active_wifi_connections() -> list[ConnectionInfo]:
                 continue
 
     return results
+
+
+STANDARD_PROBE_URLS: list[str] = [
+    "http://fedoraproject.org/static/hotspot.txt",
+    "http://connectivitycheck.gstatic.com/generate_204",
+    "http://detectportal.firefox.com/success.txt",
+    "http://connectivity-check.ubuntu.com",
+]
+
+
+@dataclass(frozen=True)
+class PortalProbeResult:
+    """Captive portal detection and HTTP redirect trace result."""
+
+    probe_url: str
+    is_captive: bool
+    final_url: str
+    status_code: int
+    redirect_chain: list[dict[str, Any]] = field(default_factory=list)
+    headers: dict[str, str] = field(default_factory=dict)
+    cookies: dict[str, str] = field(default_factory=dict)
+    html_preview: str = ""
+    full_html: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert probe result to dictionary."""
+        return {
+            "probe_url": self.probe_url,
+            "is_captive": self.is_captive,
+            "final_url": self.final_url,
+            "status_code": self.status_code,
+            "redirect_chain": self.redirect_chain,
+            "headers": self.headers,
+            "cookies": self.cookies,
+            "html_preview": self.html_preview,
+        }
+
+
+async def trace_portal_async(
+    probe_url: str = "http://fedoraproject.org/static/hotspot.txt",
+    timeout: float = 6.0,
+) -> PortalProbeResult:
+    """Perform HTTP probe tracing redirect hops and collecting captive portal landing page."""
+    redirects: list[dict[str, Any]] = []
+
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=timeout,
+        headers={"User-Agent": "UniWiFi-Recon/0.1.0", "Cache-Control": "no-cache"},
+    ) as client:
+        try:
+            response = await client.get(probe_url)
+        except httpx.HTTPError as err:
+            return PortalProbeResult(
+                probe_url=probe_url,
+                is_captive=False,
+                final_url=probe_url,
+                status_code=0,
+                html_preview=f"Network error during probe: {err}",
+            )
+
+    # Capture redirect history
+    for hop in response.history:
+        redirects.append(
+            {
+                "status_code": hop.status_code,
+                "url": str(hop.url),
+                "location": hop.headers.get("Location", ""),
+            }
+        )
+
+    final_url = str(response.url)
+    full_html = response.text
+    preview = full_html[:500].strip() if full_html else ""
+
+    # Determine if intercepted
+    if "hotspot.txt" in probe_url:
+        is_captive = not (response.status_code == 200 and response.text.strip() == "OK")
+    elif "generate_204" in probe_url:
+        is_captive = response.status_code != 204
+    else:
+        is_captive = bool(redirects or ("<form" in full_html.lower()))
+
+    headers_dict = {k: v for k, v in response.headers.items()}
+    cookies_dict = dict(response.cookies)
+
+    return PortalProbeResult(
+        probe_url=probe_url,
+        is_captive=is_captive,
+        final_url=final_url,
+        status_code=response.status_code,
+        redirect_chain=redirects,
+        headers=headers_dict,
+        cookies=cookies_dict,
+        html_preview=preview,
+        full_html=full_html,
+    )
+
+
+def trace_portal(
+    probe_url: str = "http://fedoraproject.org/static/hotspot.txt",
+    timeout: float = 6.0,
+) -> PortalProbeResult:
+    """Synchronous wrapper for trace_portal_async."""
+    return asyncio.run(trace_portal_async(probe_url=probe_url, timeout=timeout))
