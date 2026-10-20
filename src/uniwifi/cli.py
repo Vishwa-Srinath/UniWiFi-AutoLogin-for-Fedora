@@ -159,6 +159,28 @@ def recon(
             bold=True,
         )
 
+    if probe_result.form_analysis:
+        fa = probe_result.form_analysis
+        typer.secho(
+            "\n=== Captive Portal Form Analysis ===", bold=True, fg=typer.colors.CYAN
+        )
+        typer.echo(f"  Action URL:     {fa.action_url}")
+        typer.echo(f"  HTTP Method:    {fa.method}")
+        typer.echo(f"  Username Field: {fa.username_field}")
+        typer.echo(f"  Password Field: {fa.password_field}")
+        if fa.hidden_fields:
+            typer.echo(f"  Hidden Tokens:  {list(fa.hidden_fields.keys())}")
+        if fa.extra_fields:
+            typer.echo(f"  Extra Fields:   {list(fa.extra_fields.keys())}")
+
+        typer.secho("\n--- Generated Test cURL Command ---", fg=typer.colors.YELLOW)
+        typer.echo(fa.curl_command)
+
+        typer.secho(
+            "\n--- Generated config.toml [portal] Snippet ---", fg=typer.colors.GREEN
+        )
+        typer.echo(fa.config_snippet)
+
     if dump_html and probe_result.full_html:
         typer.secho("\n=== Landing Page HTML Payload ===", bold=True)
         typer.echo(probe_result.full_html)

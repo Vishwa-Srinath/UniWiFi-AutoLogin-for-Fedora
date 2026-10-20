@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from bs4 import BeautifulSoup
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,139 @@ STANDARD_PROBE_URLS: list[str] = [
 
 
 @dataclass(frozen=True)
+class PortalFormAnalysis:
+    """Parsed captive portal login form details and generated helpers."""
+
+    action_url: str
+    method: str
+    username_field: str
+    password_field: str
+    hidden_fields: dict[str, str] = field(default_factory=dict)
+    extra_fields: dict[str, str] = field(default_factory=dict)
+    curl_command: str = ""
+    config_snippet: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert form analysis to dictionary representation."""
+        return {
+            "action_url": self.action_url,
+            "method": self.method,
+            "username_field": self.username_field,
+            "password_field": self.password_field,
+            "hidden_fields": self.hidden_fields,
+            "extra_fields": self.extra_fields,
+            "curl_command": self.curl_command,
+            "config_snippet": self.config_snippet,
+        }
+
+
+def analyze_login_form(html: str, base_url: str = "") -> PortalFormAnalysis | None:
+    """Analyze captive portal HTML, locate login form, and generate curl and config snippets."""
+    if not html:
+        return None
+
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+
+    for form in soup.find_all("form"):
+        pw_input = form.find("input", {"type": "password"})
+        if not pw_input or not pw_input.get("name"):
+            continue
+
+        raw_action = form.get("action") or base_url or "/"
+        if base_url:
+            action_url = str(httpx.URL(base_url).join(raw_action))
+        else:
+            action_url = raw_action
+
+        method = (form.get("method") or "POST").upper()
+        password_field = pw_input["name"]
+
+        user_input = (
+            form.find("input", {"type": "text"})
+            or form.find("input", {"type": "email"})
+            or form.find(
+                "input",
+                {
+                    "name": lambda n: bool(
+                        n
+                        and any(
+                            k in n.lower() for k in ["user", "login", "id", "email"]
+                        )
+                    )
+                },
+            )
+        )
+        username_field = (
+            user_input["name"]
+            if (user_input and user_input.get("name"))
+            else "username"
+        )
+
+        hidden_fields: dict[str, str] = {}
+        for inp in form.find_all("input", {"type": "hidden"}):
+            name = inp.get("name")
+            if name:
+                hidden_fields[name] = inp.get("value", "")
+
+        extra_fields: dict[str, str] = {}
+        for inp in form.find_all("input"):
+            inp_type = (inp.get("type") or "text").lower()
+            name = inp.get("name")
+            if (
+                not name
+                or name in hidden_fields
+                or name in {username_field, password_field}
+            ):
+                continue
+            if inp_type in {"submit", "checkbox", "radio"}:
+                extra_fields[name] = inp.get("value", "1")
+
+        curl_parts = [f"{k}={v}" for k, v in hidden_fields.items()]
+        for k, v in extra_fields.items():
+            curl_parts.append(f"{k}={v}")
+        curl_parts.append(f"{username_field}=YOUR_USERNAME")
+        curl_parts.append(f"{password_field}=YOUR_PASSWORD")
+        data_payload = "&".join(curl_parts)
+
+        curl_cmd = (
+            f"curl -v -X {method} '{action_url}' \\\n"
+            f"  -H 'Content-Type: application/x-www-form-urlencoded' \\\n"
+            f"  -d '{data_payload}'"
+        )
+
+        extra_dict_repr = ", ".join(
+            f'{k} = "{v}"' for k, v in {**hidden_fields, **extra_fields}.items()
+        )
+        config_snippet = (
+            "[portal]\n"
+            'mode = "custom"\n'
+            f'login_url = "{action_url}"\n'
+            f'method = "{method}"\n'
+            f'username_field = "{username_field}"\n'
+            f'password_field = "{password_field}"\n'
+            f"extra_fields = {{ {extra_dict_repr} }}\n"
+            "scrape_hidden_fields = true\n"
+            "verify_tls = true"
+        )
+
+        return PortalFormAnalysis(
+            action_url=action_url,
+            method=method,
+            username_field=username_field,
+            password_field=password_field,
+            hidden_fields=hidden_fields,
+            extra_fields=extra_fields,
+            curl_command=curl_cmd,
+            config_snippet=config_snippet,
+        )
+
+    return None
+
+
+@dataclass(frozen=True)
 class PortalProbeResult:
     """Captive portal detection and HTTP redirect trace result."""
 
@@ -222,6 +356,7 @@ class PortalProbeResult:
     cookies: dict[str, str] = field(default_factory=dict)
     html_preview: str = ""
     full_html: str = ""
+    form_analysis: PortalFormAnalysis | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert probe result to dictionary."""
@@ -234,6 +369,9 @@ class PortalProbeResult:
             "headers": self.headers,
             "cookies": self.cookies,
             "html_preview": self.html_preview,
+            "form_analysis": (
+                self.form_analysis.to_dict() if self.form_analysis else None
+            ),
         }
 
 
@@ -284,6 +422,7 @@ async def trace_portal_async(
 
     headers_dict = {k: v for k, v in response.headers.items()}
     cookies_dict = dict(response.cookies)
+    form_analysis = analyze_login_form(full_html, base_url=final_url)
 
     return PortalProbeResult(
         probe_url=probe_url,
@@ -295,6 +434,7 @@ async def trace_portal_async(
         cookies=cookies_dict,
         html_preview=preview,
         full_html=full_html,
+        form_analysis=form_analysis,
     )
 
 

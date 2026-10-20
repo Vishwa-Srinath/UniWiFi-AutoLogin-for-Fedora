@@ -9,7 +9,9 @@ from __future__ import annotations
 from .recon import (
     STANDARD_PROBE_URLS,
     ConnectionInfo,
+    PortalFormAnalysis,
     PortalProbeResult,
+    analyze_login_form,
     diagnose_network_security,
     get_active_wifi_connections,
     inspect_connection,
@@ -20,9 +22,11 @@ from .recon import (
 __version__ = "0.1.0"
 __all__ = [
     "ConnectionInfo",
+    "PortalFormAnalysis",
     "PortalProbeResult",
     "STANDARD_PROBE_URLS",
     "__version__",
+    "analyze_login_form",
     "diagnose_network_security",
     "get_active_wifi_connections",
     "inspect_connection",
