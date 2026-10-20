@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Cisco Identity Services Engine Portal</title>
+</head>
+<body>
+    <div class="cisco-login-wrapper">
+        <h3>Cisco ISE Guest / Student Authentication</h3>
+        <form id="ciscoLoginForm" method="POST" action="https://ise.campus.edu:8443/portal/PortalProcess.action">
+            <input type="hidden" name="token" value="sec_token_948f2c019a">
+            <input type="hidden" name="portal" value="guest_portal_v2">
+            <input type="hidden" name="action" value="submit">
+
+            <div class="row">
+                <label for="cisco_user">Username</label>
+                <input type="text" id="cisco_user" name="user.username" autocomplete="off">
+            </div>
+            <div class="row">
+                <label for="cisco_pass">Password</label>
+                <input type="password" id="cisco_pass" name="user.password">
+            </div>
+            <input type="submit" value="Sign In">
+        </form>
+    </div>
+</body>
+</html>
