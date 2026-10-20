@@ -58,5 +58,113 @@ def run() -> None:
     typer.echo("Daemon loop will be implemented in Day 8.")
 
 
+@app.command()
+def recon(
+    connection: str | None = typer.Argument(
+        None,
+        help="Optional connection name or UUID. If omitted, inspects active Wi-Fi.",
+    ),
+    probe_url: str = typer.Option(
+        "http://fedoraproject.org/static/hotspot.txt",
+        "--probe-url",
+        "-p",
+        help="Target HTTP URL to probe for captive portal redirection.",
+    ),
+    dump_html: bool = typer.Option(
+        False,
+        "--dump-html",
+        help="Print the full HTML received from the landing page.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output reconnaissance and diagnosis in JSON format.",
+    ),
+) -> None:
+    """Diagnose network security (Type A vs Type B) and probe captive portal redirects."""
+    import json
+
+    from .recon import (
+        get_active_wifi_connections,
+        inspect_connection,
+        trace_portal,
+    )
+
+    connections = []
+    if connection:
+        try:
+            connections.append(inspect_connection(connection))
+        except Exception as err:
+            typer.secho(
+                f"Failed to inspect connection '{connection}': {err}",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1) from err
+    else:
+        connections = get_active_wifi_connections()
+
+    probe_result = trace_portal(probe_url=probe_url)
+
+    if json_output:
+        payload = {
+            "connections": [c.to_dict() for c in connections],
+            "probe": probe_result.to_dict(),
+        }
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    typer.secho(
+        "\n=== Phase 0 Network Reconnaissance ===", bold=True, fg=typer.colors.CYAN
+    )
+
+    if not connections:
+        typer.secho(
+            "No active Wi-Fi connections detected via NetworkManager.",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        for conn in connections:
+            color = typer.colors.MAGENTA if conn.is_type_a else typer.colors.GREEN
+            typer.secho(f"\n[Connection: {conn.name}] (UUID: {conn.uuid})", bold=True)
+            typer.echo(f"  Device:         {conn.device or 'N/A'}")
+            typer.echo(f"  Security:       {conn.security_type or 'None/Open'}")
+            typer.secho(
+                f"  Classification: {conn.auth_mechanism.upper()}", fg=color, bold=True
+            )
+            typer.echo(f"  Diagnosis:      {conn.diagnosis}")
+
+            if conn.remediation_command:
+                typer.secho("  Quick Fix Command:", fg=typer.colors.YELLOW, bold=True)
+                for line in conn.remediation_command.splitlines():
+                    typer.echo(f"    {line}")
+
+    typer.secho("\n=== Captive Portal HTTP Probe ===", bold=True, fg=typer.colors.CYAN)
+    typer.echo(f"  Probe Target:   {probe_result.probe_url}")
+    typer.echo(f"  Status Code:    {probe_result.status_code}")
+    typer.echo(f"  Final URL:      {probe_result.final_url}")
+
+    if probe_result.redirect_chain:
+        typer.echo("  Redirect Chain:")
+        for idx, hop in enumerate(probe_result.redirect_chain, 1):
+            typer.echo(f"    {idx}. {hop['status_code']} -> {hop['url']}")
+
+    if probe_result.is_captive:
+        typer.secho(
+            "  Result:         BEHIND CAPTIVE PORTAL", fg=typer.colors.RED, bold=True
+        )
+    else:
+        typer.secho(
+            "  Result:         DIRECT INTERNET / GENUINE ACCESS",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+
+    if dump_html and probe_result.full_html:
+        typer.secho("\n=== Landing Page HTML Payload ===", bold=True)
+        typer.echo(probe_result.full_html)
+    elif probe_result.html_preview:
+        typer.echo(f"\n  HTML Preview:   {probe_result.html_preview[:160]}...")
+
+
 if __name__ == "__main__":
     app()
