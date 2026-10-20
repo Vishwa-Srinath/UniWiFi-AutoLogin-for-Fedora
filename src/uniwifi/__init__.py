@@ -6,5 +6,18 @@ after every sleep/resume, using credentials stored securely in your system keyri
 
 from __future__ import annotations
 
+from .recon import (
+    ConnectionInfo,
+    diagnose_network_security,
+    get_active_wifi_connections,
+    inspect_connection,
+)
+
 __version__ = "0.1.0"
-__all__ = ["__version__"]
+__all__ = [
+    "ConnectionInfo",
+    "__version__",
+    "diagnose_network_security",
+    "get_active_wifi_connections",
+    "inspect_connection",
+]
