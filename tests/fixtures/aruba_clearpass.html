@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Aruba ClearPass Guest Portal</title>
+</head>
+<body>
+    <div id="login-container">
+        <h2>Aruba Networks Wireless Guest Access</h2>
+        <form name="form1" method="post" action="https://securelogin.arubanetworks.com/cgi-bin/login">
+            <input type="hidden" name="cmd" value="authenticate">
+            <input type="hidden" name="mac" value="00:11:22:33:44:55">
+            <input type="hidden" name="ip" value="10.128.4.15">
+            <input type="hidden" name="essid" value="Campus-Portal">
+            <input type="hidden" name="url" value="http://fedoraproject.org/static/hotspot.txt">
+
+            <div class="field">
+                <label>User:</label>
+                <input type="text" name="user" value="" size="20">
+            </div>
+            <div class="field">
+                <label>Password:</label>
+                <input type="password" name="password" size="20">
+            </div>
+            <input type="submit" name="Login" value="Log In">
+        </form>
+    </div>
+</body>
+</html>
