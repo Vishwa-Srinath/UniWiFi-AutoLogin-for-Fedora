@@ -212,7 +212,7 @@ def check_keyring_backend() -> KeyringStatus:
         )
 
 
-def test_keyring_rw() -> bool:
+def verify_keyring_rw() -> bool:
     """Verify read and write operations against the active keyring."""
     test_key = "__uniwifi_probe__"
     test_val = "probe_ok"

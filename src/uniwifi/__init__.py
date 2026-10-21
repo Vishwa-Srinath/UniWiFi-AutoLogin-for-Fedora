@@ -32,7 +32,7 @@ from .credentials import (
     exists,
     get_username,
     mask_secret,
-    test_keyring_rw,
+    verify_keyring_rw,
 )
 from .credentials import (
     load as load_credentials,
@@ -88,8 +88,8 @@ __all__ = [
     "mask_secret",
     "save_credentials",
     "secure_permissions",
-    "test_keyring_rw",
     "trace_portal",
     "trace_portal_async",
     "validate_config",
+    "verify_keyring_rw",
 ]
