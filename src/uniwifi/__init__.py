@@ -10,8 +10,13 @@ from .config import (
     CONFIG_DIR,
     CONFIG_PATH,
     Config,
+    ConfigError,
+    ConfigNotFoundError,
+    ConfigValidationError,
     General,
     Portal,
+    load,
+    validate_config,
 )
 from .recon import (
     STANDARD_PROBE_URLS,
@@ -31,6 +36,9 @@ __all__ = [
     "CONFIG_DIR",
     "CONFIG_PATH",
     "Config",
+    "ConfigError",
+    "ConfigNotFoundError",
+    "ConfigValidationError",
     "ConnectionInfo",
     "General",
     "Portal",
@@ -42,6 +50,8 @@ __all__ = [
     "diagnose_network_security",
     "get_active_wifi_connections",
     "inspect_connection",
+    "load",
     "trace_portal",
     "trace_portal_async",
+    "validate_config",
 ]
