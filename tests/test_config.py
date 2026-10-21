@@ -6,7 +6,9 @@ import stat
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from uniwifi.cli import app
 from uniwifi.config import (
     Config,
     ConfigError,
@@ -153,3 +155,44 @@ def test_config_to_dict() -> None:
     assert isinstance(data, dict)
     assert data["general"]["ssids"] == ["WiFi"]
     assert data["portal"]["mode"] == "form"
+
+
+def test_cli_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Verify uniwifi config --path prints target path."""
+    cfg_file = tmp_path / "config.toml"
+    monkeypatch.setattr("uniwifi.cli.CONFIG_PATH", cfg_file)
+    runner = CliRunner()
+    res = runner.invoke(app, ["config", "--path"])
+    assert res.exit_code == 0
+    assert str(cfg_file) in res.stdout
+
+
+def test_cli_config_init_and_show(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify uniwifi config --init initializes config and displays values."""
+    cfg_file = tmp_path / "config.toml"
+    monkeypatch.setattr("uniwifi.cli.CONFIG_PATH", cfg_file)
+    runner = CliRunner()
+
+    # Init
+    res_init = runner.invoke(app, ["config", "--init"])
+    assert res_init.exit_code == 0
+    assert "Initialized configuration file" in res_init.stdout
+    assert cfg_file.exists()
+
+    # Show
+    res_show = runner.invoke(app, ["config"])
+    assert res_show.exit_code == 0
+    assert "UniWiFi Configuration Settings" in res_show.stdout
+    assert "Check URL" in res_show.stdout
+
+    # Validate
+    res_val = runner.invoke(app, ["config", "--validate"])
+    assert res_val.exit_code == 0
+    assert "Configuration is valid" in res_val.stdout
+
+    # JSON
+    res_json = runner.invoke(app, ["config", "--json"])
+    assert res_json.exit_code == 0
+    assert '"general"' in res_json.stdout

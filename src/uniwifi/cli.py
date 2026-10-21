@@ -5,6 +5,7 @@ from __future__ import annotations
 import typer
 
 from . import __version__
+from .config import CONFIG_PATH
 
 app = typer.Typer(
     name="uniwifi",
@@ -61,7 +62,7 @@ def setup(
     ),
 ) -> None:
     """Store university credentials in system keyring and initialize configuration."""
-    from .config import CONFIG_PATH, init_default_config
+    from .config import init_default_config
     from .credentials import (
         check_keyring_backend,
         delete,
@@ -141,7 +142,9 @@ def setup(
     # Ensure config file exists
     if not CONFIG_PATH.exists():
         detected_ssids = [c.name for c in get_active_wifi_connections()]
-        created_path = init_default_config(ssids=detected_ssids or None)
+        created_path = init_default_config(
+            path=CONFIG_PATH, ssids=detected_ssids or None
+        )
         typer.secho(
             f"✓ Initialized configuration file: {created_path}", fg=typer.colors.GREEN
         )
@@ -151,6 +154,150 @@ def setup(
         )
     else:
         typer.echo(f"Configuration file exists: {CONFIG_PATH}")
+
+
+@app.command(name="config")
+def config_cmd(
+    show_path: bool = typer.Option(
+        False,
+        "--path",
+        "-p",
+        help="Print path to the configuration file.",
+    ),
+    validate: bool = typer.Option(
+        False,
+        "--validate",
+        "-v",
+        help="Validate configuration file against schema.",
+    ),
+    init: bool = typer.Option(
+        False,
+        "--init",
+        help="Initialize default config.toml if missing.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Display configuration in JSON format.",
+    ),
+) -> None:
+    """Inspect, validate, or initialize the uniwifi configuration file."""
+    import json
+    import stat
+
+    from .config import (
+        ConfigError,
+        init_default_config,
+        load,
+        validate_config,
+    )
+
+    if show_path:
+        typer.echo(str(CONFIG_PATH))
+        return
+
+    if init:
+        if CONFIG_PATH.exists():
+            typer.echo(f"Configuration file already exists: {CONFIG_PATH}")
+        else:
+            created = init_default_config(path=CONFIG_PATH)
+            typer.secho(
+                f"✓ Initialized configuration file: {created}",
+                fg=typer.colors.GREEN,
+            )
+        return
+
+    if not CONFIG_PATH.exists():
+        typer.secho(
+            f"Configuration file not found at: {CONFIG_PATH}",
+            fg=typer.colors.YELLOW,
+        )
+        typer.echo("Run `uniwifi config --init` or `uniwifi setup` to initialize it.")
+        raise typer.Exit(code=1)
+
+    try:
+        cfg = load(CONFIG_PATH, validate=False)
+    except ConfigError as err:
+        typer.secho(
+            f"Error reading configuration: {err}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1) from err
+
+    errors = validate_config(cfg)
+
+    if validate:
+        if errors:
+            typer.secho(
+                "\n✗ Configuration validation failed:",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+            for err in errors:
+                typer.echo(f"  - {err}")
+            raise typer.Exit(code=1)
+        else:
+            typer.secho(
+                "✓ Configuration is valid and passes all schema checks.",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+            return
+
+    if json_output:
+        typer.echo(json.dumps(cfg.to_dict(), indent=2))
+        return
+
+    file_mode = stat.S_IMODE(CONFIG_PATH.stat().st_mode)
+    perm_warning = (
+        ""
+        if file_mode == 0o600
+        else f" (Warning: permissions {oct(file_mode)} should be 0600)"
+    )
+
+    typer.secho(
+        "\n=== UniWiFi Configuration Settings ===",
+        bold=True,
+        fg=typer.colors.CYAN,
+    )
+    typer.echo(f"  Config Path:    {CONFIG_PATH}{perm_warning}")
+    typer.echo(
+        f"  SSIDs:          {', '.join(cfg.general.ssids) if cfg.general.ssids else '[None]'}"
+    )
+    typer.echo(f"  Check URL:      {cfg.general.check_url}")
+    typer.echo(f"  Check Expect:   {cfg.general.check_expect}")
+    typer.echo(f"  Resume Delay:   {cfg.general.resume_delay_seconds}s")
+    typer.echo(f"  Max Attempts:   {cfg.general.max_attempts}")
+    typer.echo(f"  Backoff Base:   {cfg.general.backoff_base_seconds}s")
+    typer.echo(f"  Notifications:  {'Enabled' if cfg.general.notify else 'Disabled'}")
+    typer.echo(
+        f"  Allowed Hosts:  {', '.join(cfg.general.allowed_hosts) if cfg.general.allowed_hosts else '[Any]'}"
+    )
+
+    typer.secho(
+        "\n=== Portal Authentication Settings ===",
+        bold=True,
+        fg=typer.colors.CYAN,
+    )
+    typer.echo(f"  Mode:           {cfg.portal.mode}")
+    typer.echo(
+        f"  Login URL:      {cfg.portal.login_url or '[Auto-detected via probe]'}"
+    )
+    typer.echo(f"  Method:         {cfg.portal.method}")
+    typer.echo(f"  Username Field: {cfg.portal.username_field}")
+    typer.echo(f"  Password Field: {cfg.portal.password_field}")
+    typer.echo(
+        f"  Scrape Hidden:  {'Enabled' if cfg.portal.scrape_hidden_fields else 'Disabled'}"
+    )
+    typer.echo(
+        f"  Verify TLS:     {'Enabled' if cfg.portal.verify_tls else 'Disabled'}"
+    )
+
+    if errors:
+        typer.secho("\n[!] Configuration Warnings:", fg=typer.colors.YELLOW, bold=True)
+        for err in errors:
+            typer.echo(f"  - {err}")
 
 
 @app.command()
