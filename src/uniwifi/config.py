@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -178,3 +180,88 @@ def load(path: Path | str = CONFIG_PATH, validate: bool = True) -> Config:
             )
 
     return config
+
+
+def ensure_config_dir(directory: Path | str = CONFIG_DIR) -> Path:
+    """Ensure configuration directory exists with private 0700 permissions."""
+    dir_path = Path(directory)
+    dir_path.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(dir_path, 0o700)
+    return dir_path
+
+
+def secure_permissions(path: Path | str) -> None:
+    """Enforce strict read/write permissions (0600) on the configuration file."""
+    file_path = Path(path)
+    if file_path.exists():
+        with contextlib.suppress(OSError):
+            os.chmod(file_path, 0o600)
+
+
+def generate_default_toml(
+    ssids: list[str] | None = None,
+    login_url: str = "",
+) -> str:
+    """Generate default TOML template string with comments."""
+    ssid_list_str = repr(ssids) if ssids else '["Campus-WiFi", "Campus-Guest"]'
+    url_str = f'"{login_url}"' if login_url else '""'
+
+    return (
+        "# UniWiFi AutoLogin Configuration\n"
+        "# File: ~/.config/uniwifi/config.toml\n\n"
+        "[general]\n"
+        f"# List of Wi-Fi SSIDs on which this daemon will activate\n"
+        f"ssids = {ssid_list_str}\n\n"
+        "# Plain HTTP URL to probe for captive portal interception\n"
+        f'check_url = "{DEFAULT_CHECK_URL}"\n\n'
+        "# Expected response body when genuine internet is available\n"
+        f'check_expect = "{DEFAULT_CHECK_EXPECT}"\n\n'
+        "# Settle pause in seconds after system resume before checking connectivity\n"
+        "resume_delay_seconds = 3\n\n"
+        "# Maximum consecutive login attempts before backing off\n"
+        "max_attempts = 5\n\n"
+        "# Base interval in seconds for exponential backoff\n"
+        "backoff_base_seconds = 5\n\n"
+        "# Enable desktop notifications via notify-send\n"
+        "notify = true\n\n"
+        "# Whitelisted captive portal hosts to prevent Rogue AP credential theft\n"
+        "allowed_hosts = []\n\n"
+        "[portal]\n"
+        '# Mode: "form" (auto-detect inputs) or "custom" (explicit field names)\n'
+        'mode = "form"\n\n'
+        f"login_url = {url_str}\n"
+        'method = "POST"\n'
+        'username_field = "username"\n'
+        'password_field = "password"\n'
+        "extra_fields = {}\n"
+        'success_contains = ""\n'
+        "scrape_hidden_fields = true\n"
+        "verify_tls = true\n"
+    )
+
+
+def init_default_config(
+    path: Path | str = CONFIG_PATH,
+    ssids: list[str] | None = None,
+    overwrite: bool = False,
+) -> Path:
+    """Initialize a default configuration file with secure permissions.
+
+    Args:
+        path: Destination path for the config file.
+        ssids: Optional list of pre-detected SSIDs to populate.
+        overwrite: If True, overwrite existing file.
+
+    Returns:
+        Path to the initialized configuration file.
+    """
+    target = Path(path)
+    ensure_config_dir(target.parent)
+
+    if not target.exists() or overwrite:
+        toml_content = generate_default_toml(ssids=ssids)
+        target.write_text(toml_content, encoding="utf-8")
+        secure_permissions(target)
+
+    return target
