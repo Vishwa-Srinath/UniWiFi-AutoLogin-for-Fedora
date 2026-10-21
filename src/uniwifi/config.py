@@ -160,8 +160,12 @@ def load(path: Path | str = CONFIG_PATH, validate: bool = True) -> Config:
     general_raw = raw.get("general", {})
     portal_raw = raw.get("portal", {})
 
-    general_kwargs = {k: v for k, v in general_raw.items() if hasattr(General, k)}
-    portal_kwargs = {k: v for k, v in portal_raw.items() if hasattr(Portal, k)}
+    general_kwargs = {
+        k: v for k, v in general_raw.items() if k in General.__dataclass_fields__
+    }
+    portal_kwargs = {
+        k: v for k, v in portal_raw.items() if k in Portal.__dataclass_fields__
+    }
 
     if "method" in portal_kwargs and isinstance(portal_kwargs["method"], str):
         portal_kwargs["method"] = portal_kwargs["method"].upper()
