@@ -6,6 +6,13 @@ after every sleep/resume, using credentials stored securely in your system keyri
 
 from __future__ import annotations
 
+from .config import (
+    CONFIG_DIR,
+    CONFIG_PATH,
+    Config,
+    General,
+    Portal,
+)
 from .recon import (
     STANDARD_PROBE_URLS,
     ConnectionInfo,
@@ -21,7 +28,12 @@ from .recon import (
 
 __version__ = "0.1.0"
 __all__ = [
+    "CONFIG_DIR",
+    "CONFIG_PATH",
+    "Config",
     "ConnectionInfo",
+    "General",
+    "Portal",
     "PortalFormAnalysis",
     "PortalProbeResult",
     "STANDARD_PROBE_URLS",
