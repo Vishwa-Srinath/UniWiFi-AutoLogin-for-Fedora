@@ -35,9 +35,122 @@ def main(
 
 
 @app.command()
-def setup() -> None:
-    """Store university Wi-Fi credentials in the system keyring."""
-    typer.echo("Credential setup will be implemented in Day 3.")
+def setup(
+    check: bool = typer.Option(
+        False,
+        "--check",
+        "-c",
+        help="Check if credentials are saved and inspect keyring backend status.",
+    ),
+    clear: bool = typer.Option(
+        False,
+        "--clear",
+        help="Delete saved credentials from the system keyring.",
+    ),
+    username: str | None = typer.Option(
+        None,
+        "--username",
+        "-u",
+        help="Provide username directly.",
+    ),
+    password: str | None = typer.Option(
+        None,
+        "--password",
+        "-p",
+        help="Provide password directly (warning: visible in shell history).",
+    ),
+) -> None:
+    """Store university credentials in system keyring and initialize configuration."""
+    from .config import CONFIG_PATH, init_default_config
+    from .credentials import (
+        check_keyring_backend,
+        delete,
+        exists,
+        get_username,
+        save,
+    )
+    from .recon import get_active_wifi_connections
+
+    if clear:
+        if exists():
+            delete()
+            typer.secho(
+                "✓ Credentials removed from system keyring.", fg=typer.colors.GREEN
+            )
+        else:
+            typer.echo("No credentials found in system keyring.")
+        return
+
+    if check:
+        status = check_keyring_backend()
+        typer.secho("\n=== Keyring Backend Status ===", bold=True, fg=typer.colors.CYAN)
+        typer.echo(f"  Backend:       {status.backend_name}")
+        typer.echo(f"  Usable:        {'Yes' if status.is_usable else 'No'}")
+        typer.echo(f"  Encrypted:     {'Yes' if status.is_encrypted else 'No'}")
+        typer.echo(f"  Message:       {status.message}")
+
+        if status.troubleshooting:
+            typer.secho(f"\n[!] Note: {status.troubleshooting}", fg=typer.colors.YELLOW)
+
+        if exists():
+            user = get_username() or "unknown"
+            typer.secho(
+                f"\n✓ Credentials stored for user: {user}",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+        else:
+            typer.secho(
+                "\n[-] No credentials saved yet. Run `uniwifi setup` to configure.",
+                fg=typer.colors.YELLOW,
+            )
+        return
+
+    # Check keyring backend health before prompting
+    keyring_info = check_keyring_backend()
+    if not keyring_info.is_usable:
+        typer.secho(
+            f"\n[!] Warning: {keyring_info.message}", fg=typer.colors.RED, bold=True
+        )
+        if keyring_info.troubleshooting:
+            typer.echo(keyring_info.troubleshooting)
+
+    typer.secho(
+        "\n=== UniWiFi AutoLogin Credential Setup ===", bold=True, fg=typer.colors.CYAN
+    )
+    typer.echo(
+        "Credentials will be securely encrypted in your OS keyring (libsecret).\n"
+    )
+
+    user_input = username or typer.prompt("University ID / Username")
+    pass_input = password or typer.prompt("Password", hide_input=True)
+
+    try:
+        save(user_input, pass_input)
+        typer.secho(
+            "✓ Credentials saved securely in system keyring.",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+    except Exception as err:
+        typer.secho(
+            f"Failed to save credentials: {err}", fg=typer.colors.RED, bold=True
+        )
+        raise typer.Exit(code=1) from err
+
+    # Ensure config file exists
+    if not CONFIG_PATH.exists():
+        detected_ssids = [c.name for c in get_active_wifi_connections()]
+        created_path = init_default_config(ssids=detected_ssids or None)
+        typer.secho(
+            f"✓ Initialized configuration file: {created_path}", fg=typer.colors.GREEN
+        )
+        typer.echo("  File permissions secured to 0600 (read/write by owner only).")
+        typer.echo(
+            "  Edit ~/.config/uniwifi/config.toml to customize SSIDs and portal settings."
+        )
+    else:
+        typer.echo(f"Configuration file exists: {CONFIG_PATH}")
 
 
 @app.command()

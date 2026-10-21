@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from keyring.errors import KeyringError
+from typer.testing import CliRunner
 
+from uniwifi.cli import app
 from uniwifi.credentials import (
     SERVICE_NAME,
     USERNAME_KEY,
@@ -155,3 +159,36 @@ def test_keyring_failure_handling(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(CredentialError):
         load()
+
+
+def test_cli_setup_flags(
+    mock_keyring: MockKeyringBackend, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify setup command with --username and --password."""
+    monkeypatch.setattr("uniwifi.config.CONFIG_PATH", tmp_path / "config.toml")
+    runner = CliRunner()
+    res = runner.invoke(app, ["setup", "-u", "cli_user", "-p", "cli_pass"])
+    assert res.exit_code == 0
+    assert "Credentials saved securely" in res.stdout
+    assert get_username() == "cli_user"
+    assert load() == ("cli_user", "cli_pass")
+
+
+def test_cli_setup_clear(mock_keyring: MockKeyringBackend) -> None:
+    """Verify setup --clear removes stored credentials."""
+    save("temp_user", "temp_pass")
+    runner = CliRunner()
+    res = runner.invoke(app, ["setup", "--clear"])
+    assert res.exit_code == 0
+    assert "Credentials removed" in res.stdout
+    assert not exists()
+
+
+def test_cli_setup_check(mock_keyring: MockKeyringBackend) -> None:
+    """Verify setup --check displays keyring status and user info."""
+    save("check_user", "check_pass")
+    runner = CliRunner()
+    res = runner.invoke(app, ["setup", "--check"])
+    assert res.exit_code == 0
+    assert "Keyring Backend Status" in res.stdout
+    assert "check_user" in res.stdout
