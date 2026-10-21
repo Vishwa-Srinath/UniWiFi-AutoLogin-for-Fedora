@@ -22,6 +22,21 @@ from .config import (
     secure_permissions,
     validate_config,
 )
+from .credentials import (
+    SERVICE_NAME,
+    CredentialError,
+    CredentialsNotFoundError,
+    delete,
+    exists,
+    get_username,
+    mask_secret,
+)
+from .credentials import (
+    load as load_credentials,
+)
+from .credentials import (
+    save as save_credentials,
+)
 from .recon import (
     STANDARD_PROBE_URLS,
     ConnectionInfo,
@@ -44,20 +59,29 @@ __all__ = [
     "ConfigNotFoundError",
     "ConfigValidationError",
     "ConnectionInfo",
+    "CredentialError",
+    "CredentialsNotFoundError",
     "General",
     "Portal",
     "PortalFormAnalysis",
     "PortalProbeResult",
+    "SERVICE_NAME",
     "STANDARD_PROBE_URLS",
     "__version__",
     "analyze_login_form",
+    "delete",
     "diagnose_network_security",
     "ensure_config_dir",
+    "exists",
     "generate_default_toml",
     "get_active_wifi_connections",
+    "get_username",
     "init_default_config",
     "inspect_connection",
     "load",
+    "load_credentials",
+    "mask_secret",
+    "save_credentials",
     "secure_permissions",
     "trace_portal",
     "trace_portal_async",
