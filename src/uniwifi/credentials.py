@@ -7,6 +7,9 @@ Rules:
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
+from typing import Any
+
 import keyring
 from keyring.errors import KeyringError
 
@@ -134,3 +137,89 @@ def delete() -> bool:
         pass
 
     return deleted
+
+
+@dataclass(frozen=True)
+class KeyringStatus:
+    """Diagnostic health summary of the current system keyring backend."""
+
+    backend_name: str
+    priority: float
+    is_recommended: bool
+    is_encrypted: bool
+    is_usable: bool
+    message: str
+    troubleshooting: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert KeyringStatus to dictionary representation."""
+        return asdict(self)
+
+
+def check_keyring_backend() -> KeyringStatus:
+    """Inspect and diagnose the active keyring backend."""
+    try:
+        backend = keyring.get_keyring()
+        backend_name = f"{backend.__class__.__module__}.{backend.__class__.__name__}"
+        priority = getattr(backend, "priority", 0.0)
+
+        # Fail backend indicates no usable service found
+        if "fail" in backend_name.lower():
+            return KeyringStatus(
+                backend_name=backend_name,
+                priority=priority,
+                is_recommended=False,
+                is_encrypted=False,
+                is_usable=False,
+                message="No functional keyring backend found on this system.",
+                troubleshooting=(
+                    "Install GNOME Keyring or KWallet: sudo dnf install gnome-keyring libsecret\n"
+                    "Ensure DBUS_SESSION_BUS_ADDRESS is set in your desktop or user service environment."
+                ),
+            )
+
+        # Standard Linux encrypted backends
+        is_recommended = any(
+            token in backend_name.lower()
+            for token in ["secretstorage", "kwallet", "libsecret"]
+        )
+        is_encrypted = not any(
+            token in backend_name.lower() for token in ["plaintext", "keyring_file"]
+        )
+
+        return KeyringStatus(
+            backend_name=backend_name,
+            priority=priority,
+            is_recommended=is_recommended,
+            is_encrypted=is_encrypted,
+            is_usable=True,
+            message=f"Active keyring backend: {backend.__class__.__name__}",
+            troubleshooting=(
+                None
+                if is_recommended
+                else "A non-standard keyring backend is active. For best security on Fedora, use libsecret / GNOME Keyring."
+            ),
+        )
+    except Exception as err:
+        return KeyringStatus(
+            backend_name="Unknown",
+            priority=0.0,
+            is_recommended=False,
+            is_encrypted=False,
+            is_usable=False,
+            message=f"Failed to query keyring backend: {err}",
+            troubleshooting="Verify D-Bus session bus and desktop keyring daemon are running.",
+        )
+
+
+def test_keyring_rw() -> bool:
+    """Verify read and write operations against the active keyring."""
+    test_key = "__uniwifi_probe__"
+    test_val = "probe_ok"
+    try:
+        keyring.set_password(SERVICE_NAME, test_key, test_val)
+        retrieved = keyring.get_password(SERVICE_NAME, test_key)
+        keyring.delete_password(SERVICE_NAME, test_key)
+        return retrieved == test_val
+    except Exception:
+        return False
