@@ -7,12 +7,14 @@ genuine internet connectivity, captive portal interception, and offline states.
 from __future__ import annotations
 
 import enum
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
+from bs4 import BeautifulSoup
 
 DEFAULT_CHECK_URL = "http://fedoraproject.org/static/hotspot.txt"
 DEFAULT_CHECK_EXPECT = "OK"
@@ -80,6 +82,62 @@ def is_host_allowed(url: str, allowed_hosts: list[str] | None) -> bool:
     return False
 
 
+def detect_portal_heuristics(html: str, base_url: str) -> str | None:
+    """Scan HTML content for captive portal redirection cues and login forms.
+
+    Detects:
+      1. Meta-refresh tags (<meta http-equiv="refresh" content="... url=...">)
+      2. JavaScript redirects (window.location.replace, location.href)
+      3. Forms containing a password field
+
+    Returns the absolute portal landing URL if detected, or None.
+    """
+    if not html or not html.strip():
+        return None
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return None
+
+    # 1. Meta refresh tag, e.g. <meta http-equiv="refresh" content="0; url=https://portal.univ.edu">
+    meta_refresh = soup.find(
+        "meta", attrs={"http-equiv": re.compile(r"^refresh$", re.I)}
+    )
+    if meta_refresh and meta_refresh.get("content"):
+        content = str(meta_refresh["content"])
+        match = re.search(r"url\s*=\s*['\"]?([^'\";\s]+)", content, re.I)
+        if match:
+            target = match.group(1).strip()
+            return urljoin(base_url, target)
+
+    # 2. JavaScript location redirects
+    js_patterns = [
+        r"(?:window\.)?location(?:\.href|\.replace)\s*=\s*['\"]([^'\"]+)['\"]",
+        r"(?:window\.)?location\.replace\(\s*['\"]([^'\"]+)['\"]\s*\)",
+        r"(?:window\.)?location\.assign\(\s*['\"]([^'\"]+)['\"]\s*\)",
+    ]
+    for script in soup.find_all("script"):
+        script_text = script.string or script.get_text() or ""
+        for pattern in js_patterns:
+            m = re.search(pattern, script_text, re.I)
+            if m:
+                target = m.group(1).strip()
+                return urljoin(base_url, target)
+
+    # 3. Inline login forms (e.g., forms with password field)
+    forms = soup.find_all("form")
+    for form in forms:
+        pwd_input = form.find("input", attrs={"type": re.compile(r"^password$", re.I)})
+        if pwd_input:
+            action = form.get("action")
+            if action:
+                return urljoin(base_url, str(action))
+            return base_url
+
+    return None
+
+
 async def probe_async(
     check_url: str = DEFAULT_CHECK_URL,
     expect: str = DEFAULT_CHECK_EXPECT,
@@ -129,7 +187,7 @@ async def probe_async(
 
             # Case 2: Clean 200 OK without redirects matching expected body
             clean_success = (
-                status_code == 200 and not response.history and expect in html.strip()
+                status_code == 200 and not response.history and html.strip() == expect
             )
 
             if clean_success:
@@ -144,14 +202,30 @@ async def probe_async(
                     trusted_host=True,
                 )
 
-            # Case 3: Captive portal intercepted (via redirects or altered body)
-            portal_url = final_url if final_url != check_url else None
-            trusted = is_host_allowed(final_url, allowed_hosts) if portal_url else True
+            # Case 3: Captive portal intercepted (via redirects, altered body, or heuristics)
+            heuristic_url = detect_portal_heuristics(html, final_url)
+            portal_url = (
+                heuristic_url
+                or (final_url if final_url != check_url else None)
+                or final_url
+            )
 
+            # Check if this is a server error rather than a captive portal
+            if status_code >= 400 and not heuristic_url and not response.history:
+                return ProbeResult(
+                    state=ConnectivityState.OFFLINE,
+                    online=False,
+                    status_code=status_code,
+                    html=html,
+                    latency_ms=latency_ms,
+                    error=f"Probe endpoint returned HTTP error {status_code}",
+                )
+
+            trusted = is_host_allowed(portal_url, allowed_hosts)
             return ProbeResult(
                 state=ConnectivityState.PORTAL,
                 online=False,
-                portal_url=portal_url or final_url,
+                portal_url=portal_url,
                 status_code=status_code,
                 html=html,
                 latency_ms=latency_ms,
