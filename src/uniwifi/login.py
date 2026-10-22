@@ -6,6 +6,7 @@ and credential submission against campus captive portals.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from dataclasses import dataclass, field
@@ -15,8 +16,13 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup, Tag
 
-from .config import Portal
-from .detector import UntrustedHostError, is_host_allowed
+from .config import Config, Portal
+from .detector import (
+    ConnectivityState,
+    UntrustedHostError,
+    is_host_allowed,
+    probe_async,
+)
 
 
 class LoginError(Exception):
@@ -417,3 +423,118 @@ async def login_async(
         follow_redirects=True,
     ) as http:
         return await _execute_login(http)
+
+
+def login(
+    portal: Portal,
+    portal_url: str,
+    html: str | None = None,
+    username: str = "",
+    password: str = "",
+    allowed_hosts: list[str] | None = None,
+    timeout: float = 10.0,
+) -> LoginResult:
+    """Synchronously submit credentials to the captive portal."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(
+                asyncio.run,
+                login_async(
+                    portal=portal,
+                    portal_url=portal_url,
+                    html=html,
+                    username=username,
+                    password=password,
+                    allowed_hosts=allowed_hosts,
+                    timeout=timeout,
+                ),
+            ).result()
+
+    return asyncio.run(
+        login_async(
+            portal=portal,
+            portal_url=portal_url,
+            html=html,
+            username=username,
+            password=password,
+            allowed_hosts=allowed_hosts,
+            timeout=timeout,
+        )
+    )
+
+
+async def login_and_verify_async(
+    config: Config,
+    username: str,
+    password: str,
+    portal_url: str | None = None,
+    html: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> LoginResult:
+    """Check connectivity, perform login if intercepted, and verify internet restoration."""
+    target_portal_url = portal_url
+    target_html = html
+
+    # 1. Probe current state if portal URL was not directly supplied
+    if not target_portal_url:
+        probe_res = await probe_async(
+            check_url=config.general.check_url,
+            expect=config.general.check_expect,
+            allowed_hosts=config.general.allowed_hosts,
+        )
+        if probe_res.state == ConnectivityState.ONLINE:
+            return LoginResult(
+                success=True,
+                status_code=200,
+                landing_url=config.general.check_url,
+                extra={"already_online": True},
+            )
+        if probe_res.state == ConnectivityState.OFFLINE:
+            return LoginResult(
+                success=False,
+                status_code=0,
+                landing_url="",
+                error=f"Cannot reach network probe: {probe_res.error}",
+            )
+        target_portal_url = probe_res.portal_url or config.portal.login_url
+        target_html = probe_res.html
+
+    if not target_portal_url:
+        raise PortalFormNotFoundError(
+            "Captive portal was detected but no target login URL could be resolved."
+        )
+
+    # 2. Submit login request
+    login_result = await login_async(
+        portal=config.portal,
+        portal_url=target_portal_url,
+        html=target_html,
+        username=username,
+        password=password,
+        allowed_hosts=config.general.allowed_hosts,
+        client=client,
+    )
+
+    # 3. Post-login verification probe
+    post_probe = await probe_async(
+        check_url=config.general.check_url,
+        expect=config.general.check_expect,
+        allowed_hosts=config.general.allowed_hosts,
+    )
+
+    if post_probe.state == ConnectivityState.ONLINE:
+        login_result.extra["verified_online"] = True
+        return login_result
+
+    # Device still behind captive portal or offline
+    raise AuthenticationFailedError(
+        f"Credentials submitted to {target_portal_url}, but network verification failed. "
+        f"Device state is {post_probe.state.value} (portal: {post_probe.portal_url})."
+    )
