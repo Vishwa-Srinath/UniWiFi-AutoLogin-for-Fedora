@@ -6,6 +6,7 @@ genuine internet connectivity, captive portal interception, and offline states.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import re
 import time
@@ -269,4 +270,57 @@ async def probe_async(
             online=False,
             latency_ms=latency_ms,
             error=f"Unexpected probe error: {err}",
+        )
+
+
+def probe(
+    check_url: str = DEFAULT_CHECK_URL,
+    expect: str = DEFAULT_CHECK_EXPECT,
+    timeout: float = DEFAULT_PROBE_TIMEOUT,
+    follow_redirects: bool = True,
+    allowed_hosts: list[str] | None = None,
+) -> ProbeResult:
+    """Synchronously probe check URL to determine network connectivity state."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(
+                asyncio.run,
+                probe_async(
+                    check_url=check_url,
+                    expect=expect,
+                    timeout=timeout,
+                    follow_redirects=follow_redirects,
+                    allowed_hosts=allowed_hosts,
+                ),
+            ).result()
+
+    return asyncio.run(
+        probe_async(
+            check_url=check_url,
+            expect=expect,
+            timeout=timeout,
+            follow_redirects=follow_redirects,
+            allowed_hosts=allowed_hosts,
+        )
+    )
+
+
+def verify_portal_safety(result: ProbeResult, allowed_hosts: list[str] | None) -> None:
+    """Raise UntrustedHostError if portal host is not in allowed_hosts."""
+    if (
+        result.state == ConnectivityState.PORTAL
+        and allowed_hosts
+        and not result.trusted_host
+    ):
+        parsed = urlparse(result.portal_url or "")
+        host = parsed.hostname or result.portal_url or "unknown"
+        raise UntrustedHostError(
+            f"Captive portal host '{host}' is not in allowed_hosts allowlist: {allowed_hosts}"
         )
