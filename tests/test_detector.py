@@ -268,3 +268,76 @@ def test_probe_synchronous_wrapper() -> None:
     assert d["state"] == "online"
     assert d["online"] is True
     assert "latency_ms" in d
+
+
+@respx.mock
+def test_cli_status_online() -> None:
+    """Verify uniwifi status CLI reports ONLINE with exit code 0."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+
+    respx.get(DEFAULT_CHECK_URL).respond(status_code=200, text="OK\n")
+    runner = CliRunner()
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "Status: ONLINE" in result.stdout
+    assert "Full internet connectivity detected" in result.stdout
+
+
+@respx.mock
+def test_cli_status_behind_portal() -> None:
+    """Verify uniwifi status CLI reports PORTAL with exit code 2."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+
+    portal_url = "https://portal.univ.edu/guest"
+    respx.get(DEFAULT_CHECK_URL).respond(
+        status_code=302, headers={"Location": portal_url}
+    )
+    respx.get(portal_url).respond(status_code=200, text="Login Page")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 2
+    assert "Status: BEHIND CAPTIVE PORTAL" in result.stdout
+    assert portal_url in result.stdout
+
+
+@respx.mock
+def test_cli_status_offline() -> None:
+    """Verify uniwifi status CLI reports OFFLINE with exit code 1."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+
+    respx.get(DEFAULT_CHECK_URL).mock(
+        side_effect=httpx.ConnectTimeout("Connection timed out")
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 1
+    assert "Status: OFFLINE" in result.stdout
+
+
+@respx.mock
+def test_cli_status_json() -> None:
+    """Verify uniwifi status --json produces valid JSON output."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+
+    respx.get(DEFAULT_CHECK_URL).respond(status_code=200, text="OK\n")
+    runner = CliRunner()
+    result = runner.invoke(app, ["status", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["probe"]["state"] == "online"
+    assert data["probe"]["online"] is True
