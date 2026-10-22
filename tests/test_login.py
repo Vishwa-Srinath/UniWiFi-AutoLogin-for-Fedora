@@ -290,3 +290,212 @@ async def test_login_and_verify_async_flow() -> None:
     )
     assert res.success is True
     assert res.extra.get("verified_online") is True
+
+
+def test_cli_login_no_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify login CLI exits with error code 1 when no credentials are provided."""
+    from typer.testing import CliRunner
+
+    import uniwifi.credentials as creds
+    from uniwifi.cli import app
+
+    def mock_load() -> tuple[str, str]:
+        raise creds.CredentialsNotFoundError("No credentials found")
+
+    monkeypatch.setattr(creds, "load", mock_load)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["login"])
+    assert result.exit_code == 1
+    assert "No credentials available" in result.stdout
+
+
+@respx.mock
+def test_cli_login_already_online() -> None:
+    """Verify login CLI detects already online state and skips submission unless forced."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+    from uniwifi.detector import DEFAULT_CHECK_URL
+
+    respx.get(DEFAULT_CHECK_URL).respond(status_code=200, text="OK\n")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["login", "-u", "testuser", "-p", "testpass"])
+    assert result.exit_code == 0
+    assert "Already online" in result.stdout
+    assert "No captive portal authentication required" in result.stdout
+
+
+@respx.mock
+def test_cli_login_already_online_json() -> None:
+    """Verify login CLI outputs JSON when already online."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+    from uniwifi.detector import DEFAULT_CHECK_URL
+
+    respx.get(DEFAULT_CHECK_URL).respond(status_code=200, text="OK\n")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["login", "-u", "testuser", "-p", "testpass", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["status"] == "already_online"
+
+
+@respx.mock
+def test_cli_login_dry_run() -> None:
+    """Verify login CLI --dry-run parses form and outputs payload without sending POST."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+    from uniwifi.detector import DEFAULT_CHECK_URL
+
+    portal_url = "https://portal.university.edu/login.html"
+    fixture_path = FIXTURES_DIR / "portal_login.html"
+    portal_html = fixture_path.read_text(encoding="utf-8")
+
+    respx.get(DEFAULT_CHECK_URL).respond(
+        status_code=302, headers={"Location": portal_url}
+    )
+    respx.get(portal_url).respond(status_code=200, text=portal_html)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["login", "-u", "student123", "-p", "mypassword", "--dry-run"],
+    )
+    assert result.exit_code == 0
+    assert "UniWiFi Login Dry-Run" in result.stdout
+    assert "https://portal.university.edu/auth/login" in result.stdout
+    assert "csrf_token" in result.stdout
+
+
+@respx.mock
+def test_cli_login_success() -> None:
+    """Verify login CLI successfully submits credentials and verifies connectivity."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+    from uniwifi.detector import DEFAULT_CHECK_URL
+
+    portal_url = "https://portal.university.edu/login.html"
+    action_url = "https://portal.university.edu/auth/login"
+    fixture_path = FIXTURES_DIR / "portal_login.html"
+    portal_html = fixture_path.read_text(encoding="utf-8")
+
+    respx.get(DEFAULT_CHECK_URL).side_effect = [
+        httpx.Response(302, headers={"Location": portal_url}),
+        httpx.Response(200, text="OK\n"),
+    ]
+    respx.get(portal_url).respond(status_code=200, text=portal_html)
+    respx.post(action_url).respond(
+        status_code=200, text="<html><body>Success! Welcome</body></html>"
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["login", "-u", "student123", "-p", "mypassword"],
+    )
+    assert result.exit_code == 0
+    assert "Authenticated successfully!" in result.stdout
+    assert "Internet connectivity verified" in result.stdout
+
+
+@respx.mock
+def test_cli_login_password_stdin() -> None:
+    """Verify login CLI reads password from stdin with --password-stdin."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+    from uniwifi.detector import DEFAULT_CHECK_URL
+
+    portal_url = "https://portal.university.edu/login.html"
+    action_url = "https://portal.university.edu/auth/login"
+    fixture_path = FIXTURES_DIR / "portal_login.html"
+    portal_html = fixture_path.read_text(encoding="utf-8")
+
+    respx.get(DEFAULT_CHECK_URL).side_effect = [
+        httpx.Response(302, headers={"Location": portal_url}),
+        httpx.Response(200, text="OK\n"),
+    ]
+    respx.get(portal_url).respond(status_code=200, text=portal_html)
+    respx.post(action_url).respond(
+        status_code=200, text="<html><body>Success! Welcome</body></html>"
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["login", "-u", "student123", "--password-stdin"],
+        input="secret_from_stdin\n",
+    )
+    assert result.exit_code == 0
+    assert "Authenticated successfully!" in result.stdout
+
+
+@respx.mock
+def test_cli_login_invalid_credentials_abort() -> None:
+    """Verify login CLI immediately halts retries on invalid username/password."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+    from uniwifi.detector import DEFAULT_CHECK_URL
+
+    portal_url = "https://portal.university.edu/login.html"
+    action_url = "https://portal.university.edu/auth/login"
+    fixture_path = FIXTURES_DIR / "portal_login.html"
+    portal_html = fixture_path.read_text(encoding="utf-8")
+
+    respx.get(DEFAULT_CHECK_URL).respond(
+        status_code=302, headers={"Location": portal_url}
+    )
+    respx.get(portal_url).respond(status_code=200, text=portal_html)
+    respx.post(action_url).respond(
+        status_code=200,
+        text="<html><body>The username or password is incorrect. Please try again.</body></html>",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["login", "-u", "student123", "-p", "wrongpassword"],
+    )
+    assert result.exit_code == 1
+    assert "Login rejected: Invalid username or password" in result.stdout
+    assert "Immediate abort" in result.stdout
+
+
+@respx.mock
+def test_cli_login_account_locked() -> None:
+    """Verify login CLI detects and alerts when university account is locked."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+    from uniwifi.detector import DEFAULT_CHECK_URL
+
+    portal_url = "https://portal.university.edu/login.html"
+    action_url = "https://portal.university.edu/auth/login"
+    fixture_path = FIXTURES_DIR / "portal_login.html"
+    portal_html = fixture_path.read_text(encoding="utf-8")
+
+    respx.get(DEFAULT_CHECK_URL).respond(
+        status_code=302, headers={"Location": portal_url}
+    )
+    respx.get(portal_url).respond(status_code=200, text=portal_html)
+    respx.post(action_url).respond(
+        status_code=200,
+        text="<html><body>Your account has been locked due to too many failed attempts.</body></html>",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["login", "-u", "student123", "-p", "password"],
+    )
+    assert result.exit_code == 1
+    assert "ACCOUNT LOCKED" in result.stdout
