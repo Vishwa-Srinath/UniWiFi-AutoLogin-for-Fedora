@@ -301,9 +301,108 @@ def config_cmd(
 
 
 @app.command()
-def status() -> None:
+def status(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Display status in JSON format.",
+    ),
+    timeout: float = typer.Option(
+        5.0,
+        "--timeout",
+        "-t",
+        help="Probe timeout in seconds.",
+    ),
+    probe_url: str | None = typer.Option(
+        None,
+        "--probe-url",
+        "-p",
+        help="Custom HTTP URL to probe for connectivity/interception.",
+    ),
+) -> None:
     """Show whether current connection is online or behind a portal."""
-    typer.echo("Portal detection status will be implemented in Day 4.")
+    import json
+
+    from .config import CONFIG_PATH, load
+    from .detector import (
+        DEFAULT_CHECK_EXPECT,
+        DEFAULT_CHECK_URL,
+        ConnectivityState,
+        probe,
+    )
+    from .recon import get_active_wifi_connections
+
+    check_url = DEFAULT_CHECK_URL
+    check_expect = DEFAULT_CHECK_EXPECT
+    allowed_hosts: list[str] = []
+
+    if CONFIG_PATH.exists():
+        try:
+            cfg = load(CONFIG_PATH, validate=False)
+            check_url = cfg.general.check_url
+            check_expect = cfg.general.check_expect
+            allowed_hosts = cfg.general.allowed_hosts
+        except Exception:
+            pass
+
+    if probe_url:
+        check_url = probe_url
+
+    active_conns = get_active_wifi_connections()
+
+    result = probe(
+        check_url=check_url,
+        expect=check_expect,
+        timeout=timeout,
+        allowed_hosts=allowed_hosts,
+    )
+
+    if json_output:
+        payload = {
+            "active_wifi": [c.to_dict() for c in active_conns],
+            "probe": result.to_dict(),
+        }
+        typer.echo(json.dumps(payload, indent=2))
+        if result.state == ConnectivityState.ONLINE:
+            return
+        elif result.state == ConnectivityState.PORTAL:
+            raise typer.Exit(code=2)
+        else:
+            raise typer.Exit(code=1)
+
+    typer.secho(
+        "\n=== UniWiFi Connectivity Status ===", bold=True, fg=typer.colors.CYAN
+    )
+    if active_conns:
+        conn_strs = [f"{c.name} ({c.device})" for c in active_conns]
+        typer.echo(f"  Active Wi-Fi:   {', '.join(conn_strs)}")
+    else:
+        typer.echo("  Active Wi-Fi:   [None / Not connected]")
+
+    typer.echo(f"  Probe Target:   {check_url}")
+    typer.echo(f"  Latency:        {result.latency_ms:.1f} ms")
+
+    if result.state == ConnectivityState.ONLINE:
+        typer.secho("\nStatus: ONLINE", bold=True, fg=typer.colors.GREEN)
+        typer.echo("  ✓ Full internet connectivity detected.")
+        typer.echo("  No captive portal authentication required.")
+    elif result.state == ConnectivityState.PORTAL:
+        typer.secho(
+            "\nStatus: BEHIND CAPTIVE PORTAL", bold=True, fg=typer.colors.YELLOW
+        )
+        typer.echo(f"  ✗ Intercepted by: {result.portal_url}")
+        if not result.trusted_host:
+            typer.secho(
+                "  [!] WARNING: Portal domain is not in allowed_hosts!",
+                bold=True,
+                fg=typer.colors.RED,
+            )
+        typer.echo("  Run `uniwifi login` to authenticate.")
+        raise typer.Exit(code=2)
+    else:
+        typer.secho("\nStatus: OFFLINE", bold=True, fg=typer.colors.RED)
+        typer.echo(f"  ✗ {result.error or 'Unable to reach probe destination.'}")
+        raise typer.Exit(code=1)
 
 
 @app.command()
