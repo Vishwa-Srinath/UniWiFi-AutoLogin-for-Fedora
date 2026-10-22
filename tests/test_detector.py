@@ -10,7 +10,12 @@ from uniwifi.detector import (
     DEFAULT_CHECK_EXPECT,
     DEFAULT_CHECK_URL,
     ConnectivityState,
+    UntrustedHostError,
+    detect_portal_heuristics,
+    is_host_allowed,
+    probe,
     probe_async,
+    verify_portal_safety,
 )
 
 
@@ -133,3 +138,133 @@ async def test_probe_async_http_server_error() -> None:
     assert result.state == ConnectivityState.OFFLINE
     assert result.online is False
     assert "HTTP error 500" in (result.error or "")
+
+
+def test_detect_portal_heuristics_meta_refresh() -> None:
+    """Verify detection of meta-refresh redirect tags."""
+    html = """
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta http-equiv="refresh" content="0; url=https://portal.univ.edu/guest/login">
+      </head>
+      <body>Redirecting to login portal...</body>
+    </html>
+    """
+    detected = detect_portal_heuristics(html, "http://check.com/hotspot.txt")
+    assert detected == "https://portal.univ.edu/guest/login"
+
+
+def test_detect_portal_heuristics_relative_meta_refresh() -> None:
+    """Verify relative URL in meta-refresh resolves against base URL."""
+    html = '<meta http-equiv="Refresh" content="0; URL=/portal/index.html">'
+    detected = detect_portal_heuristics(html, "http://10.0.0.1:8080/probe")
+    assert detected == "http://10.0.0.1:8080/portal/index.html"
+
+
+def test_detect_portal_heuristics_js_redirect() -> None:
+    """Verify detection of window.location.replace in inline scripts."""
+    html = """
+    <html>
+      <head>
+        <script type="text/javascript">
+          window.location.replace("https://login.campus.edu/auth?dest=net");
+        </script>
+      </head>
+    </html>
+    """
+    detected = detect_portal_heuristics(html, "http://check.com")
+    assert detected == "https://login.campus.edu/auth?dest=net"
+
+
+def test_detect_portal_heuristics_login_form() -> None:
+    """Verify detection of inline login forms with password input."""
+    html = """
+    <html>
+      <body>
+        <form action="/login.do" method="POST">
+          <input type="text" name="username">
+          <input type="password" name="password">
+          <button type="submit">Submit</button>
+        </form>
+      </body>
+    </html>
+    """
+    detected = detect_portal_heuristics(html, "http://192.168.1.1/splash.html")
+    assert detected == "http://192.168.1.1/login.do"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_probe_async_meta_refresh_interception() -> None:
+    """Verify HTTP 200 containing meta-refresh to portal is recognized as PORTAL."""
+    meta_html = (
+        '<html><head><meta http-equiv="refresh" '
+        'content="0; url=https://portal.univ.edu/welcome"></head></html>'
+    )
+    respx.get(DEFAULT_CHECK_URL).respond(
+        status_code=200,
+        text=meta_html,
+        headers={"Content-Type": "text/html"},
+    )
+
+    result = await probe_async(DEFAULT_CHECK_URL)
+
+    assert result.state == ConnectivityState.PORTAL
+    assert result.online is False
+    assert result.portal_url == "https://portal.univ.edu/welcome"
+
+
+def test_is_host_allowed() -> None:
+    """Verify domain allowlist logic matches exact and subdomains."""
+    allowlist = ["univ.edu", "wifi.campus.org"]
+
+    assert is_host_allowed("https://univ.edu/login", allowlist) is True
+    assert is_host_allowed("https://portal.univ.edu/login", allowlist) is True
+    assert is_host_allowed("https://wifi.campus.org/", allowlist) is True
+    assert is_host_allowed("https://evil-portal.com/login", allowlist) is False
+    assert is_host_allowed("https://notuniv.edu/login", allowlist) is False
+    assert is_host_allowed("https://univ.edu", None) is True
+    assert is_host_allowed("https://univ.edu", []) is True
+
+
+def test_verify_portal_safety() -> None:
+    """Verify UntrustedHostError raised for untrusted portal host."""
+    allowlist = ["univ.edu"]
+    from uniwifi.detector import ProbeResult
+
+    trusted = ProbeResult(
+        state=ConnectivityState.PORTAL,
+        online=False,
+        portal_url="https://auth.univ.edu/login",
+        trusted_host=True,
+    )
+    verify_portal_safety(trusted, allowlist)  # Should not raise
+
+    untrusted = ProbeResult(
+        state=ConnectivityState.PORTAL,
+        online=False,
+        portal_url="https://phishing.site/login",
+        trusted_host=False,
+    )
+    with pytest.raises(UntrustedHostError) as exc_info:
+        verify_portal_safety(untrusted, allowlist)
+    assert "phishing.site" in str(exc_info.value)
+
+
+@respx.mock
+def test_probe_synchronous_wrapper() -> None:
+    """Verify synchronous probe wrapper correctly invokes async engine."""
+    respx.get(DEFAULT_CHECK_URL).respond(status_code=200, text="OK\n")
+
+    result = probe(DEFAULT_CHECK_URL)
+
+    assert result.state == ConnectivityState.ONLINE
+    assert result.online is True
+    assert result.status_code == 200
+
+    # Test to_dict export
+    d = result.to_dict()
+    assert d["state"] == "online"
+    assert d["online"] is True
+    assert "latency_ms" in d
