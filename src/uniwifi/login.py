@@ -6,8 +6,12 @@ and credential submission against campus captive portals.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urljoin
+
+from bs4 import BeautifulSoup, Tag
 
 
 class LoginError(Exception):
@@ -80,3 +84,125 @@ class LoginResult:
             "html_length": len(self.response_html) if self.response_html else 0,
             "extra": self.extra,
         }
+
+
+def extract_hidden_fields(form_element: Tag) -> dict[str, str]:
+    """Extract hidden input parameters (e.g., CSRF tokens, session state)."""
+    hidden_data: dict[str, str] = {}
+    for inp in form_element.find_all(
+        "input", attrs={"type": re.compile(r"^hidden$", re.I)}
+    ):
+        name = inp.get("name")
+        if name:
+            hidden_data[str(name)] = str(inp.get("value", ""))
+    return hidden_data
+
+
+def autodetect_login_form(
+    html: str,
+    base_url: str,
+    username_field_hint: str | None = None,
+    password_field_hint: str | None = None,
+) -> DetectedForm:
+    """Scan HTML and identify the primary captive portal login form and fields."""
+    if not html or not html.strip():
+        raise PortalFormNotFoundError(f"Received empty HTML payload from {base_url}")
+
+    soup = BeautifulSoup(html, "html.parser")
+    forms = soup.find_all("form")
+
+    best_form: Tag | None = None
+    best_pwd_input: Tag | None = None
+
+    # Search forms with password inputs
+    for form in forms:
+        pwd_input = form.find("input", attrs={"type": re.compile(r"^password$", re.I)})
+        if not pwd_input and password_field_hint:
+            pwd_input = form.find(
+                "input",
+                attrs={
+                    "name": re.compile(rf"^{re.escape(password_field_hint)}$", re.I)
+                },
+            )
+        if pwd_input:
+            best_form = form
+            best_pwd_input = pwd_input
+            break
+
+    if not best_form or not best_pwd_input:
+        # Fallback: check standalone password input
+        pwd_input = soup.find("input", attrs={"type": re.compile(r"^password$", re.I)})
+        if not pwd_input and password_field_hint:
+            pwd_input = soup.find(
+                "input",
+                attrs={
+                    "name": re.compile(rf"^{re.escape(password_field_hint)}$", re.I)
+                },
+            )
+        if pwd_input and pwd_input.parent:
+            best_form = pwd_input.parent
+            best_pwd_input = pwd_input
+        else:
+            raise PortalFormNotFoundError(
+                f"Could not locate a login form or password input on portal page: {base_url}"
+            )
+
+    # Resolve action URL and method
+    action = best_form.get("action") if isinstance(best_form, Tag) else None
+    action_url = urljoin(base_url, str(action)) if action else base_url
+    method = (
+        (best_form.get("method") or "POST").upper()
+        if isinstance(best_form, Tag)
+        else "POST"
+    )
+
+    # Identify password field name
+    password_field = best_pwd_input.get("name") or password_field_hint or "password"
+
+    # Identify username field name
+    username_field = username_field_hint
+    if not username_field and isinstance(best_form, Tag):
+        user_regex = re.compile(
+            r"^(username|user|login|email|id|account|auth_user|user_id|uid|uname)$",
+            re.I,
+        )
+        candidates = best_form.find_all(
+            "input",
+            attrs={"type": re.compile(r"^(text|email|tel)?$", re.I)},
+        )
+        for cand in candidates:
+            cand_name = cand.get("name") or ""
+            cand_id = cand.get("id") or ""
+            if user_regex.search(cand_name) or user_regex.search(cand_id):
+                username_field = cand_name or cand_id
+                break
+
+        if not username_field and candidates:
+            first_text = candidates[0].get("name")
+            if first_text:
+                username_field = first_text
+
+    username_field = username_field or "username"
+
+    # Extract hidden fields and extra inputs
+    hidden_fields = (
+        extract_hidden_fields(best_form) if isinstance(best_form, Tag) else {}
+    )
+    extra_inputs: dict[str, str] = {}
+
+    if isinstance(best_form, Tag):
+        for submit_btn in best_form.find_all(
+            "input", attrs={"type": re.compile(r"^(submit|button)$", re.I)}
+        ):
+            btn_name = submit_btn.get("name")
+            if btn_name:
+                extra_inputs[str(btn_name)] = str(submit_btn.get("value", "Submit"))
+
+    return DetectedForm(
+        action_url=action_url,
+        method=method,
+        username_field=str(username_field),
+        password_field=str(password_field),
+        hidden_fields=hidden_fields,
+        extra_inputs=extra_inputs,
+    )
