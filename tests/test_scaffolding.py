@@ -33,6 +33,7 @@ def test_cli_help_flag() -> None:
 def test_cli_subcommand_stubs() -> None:
     """Verify remaining stub commands execute with exit code 0."""
     assert runner.invoke(app, ["setup", "--check"]).exit_code == 0
-    for cmd in ["login", "run"]:
+    assert runner.invoke(app, ["login", "--help"]).exit_code == 0
+    for cmd in ["run"]:
         result = runner.invoke(app, [cmd])
         assert result.exit_code == 0

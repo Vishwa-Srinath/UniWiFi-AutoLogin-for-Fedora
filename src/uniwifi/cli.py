@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import typer
 
 from . import __version__
@@ -406,9 +408,222 @@ def status(
 
 
 @app.command()
-def login() -> None:
-    """Execute a single synchronous login attempt."""
-    typer.echo("Manual login will be implemented in Day 5.")
+def login(
+    username: str | None = typer.Option(
+        None,
+        "--username",
+        "-u",
+        help="University ID / username (overrides saved keyring value).",
+    ),
+    password: str | None = typer.Option(
+        None,
+        "--password",
+        "-p",
+        help="Password (overrides saved keyring value).",
+    ),
+    password_stdin: bool = typer.Option(
+        False,
+        "--password-stdin",
+        help="Read password from standard input.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Submit credentials even if network probe reports already online.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Inspect portal form and print submission payload without sending.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output result as JSON.",
+    ),
+) -> None:
+    """Execute a single synchronous captive portal login attempt."""
+    import asyncio
+    import json
+    import sys
+
+    from .config import Config, load
+    from .credentials import CredentialsNotFoundError
+    from .credentials import load as load_credentials
+    from .detector import ConnectivityState, UntrustedHostError, probe
+    from .login import (
+        AccountLockedError,
+        AuthenticationFailedError,
+        InvalidCredentialsError,
+        PortalFormNotFoundError,
+        autodetect_login_form,
+        login_and_verify_async,
+    )
+
+    # 1. Resolve configuration
+    cfg = Config()
+    if CONFIG_PATH.exists():
+        with contextlib.suppress(Exception):
+            cfg = load(CONFIG_PATH, validate=False)
+
+    # 2. Resolve credentials
+    final_user = username
+    final_pass = password
+
+    if password_stdin:
+        final_pass = sys.stdin.readline().rstrip("\r\n")
+
+    if not final_user or not final_pass:
+        with contextlib.suppress(CredentialsNotFoundError):
+            saved_user, saved_pass = load_credentials()
+            final_user = final_user or saved_user
+            final_pass = final_pass or saved_pass
+
+    if not final_user or not final_pass:
+        typer.secho(
+            "✗ No credentials available.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        typer.echo("  Run `uniwifi setup` to save credentials to system keyring,")
+        typer.echo("  or pass credentials via --username and --password.")
+        raise typer.Exit(code=1)
+
+    # 3. Check current connectivity unless --force is specified
+    portal_url: str | None = None
+    portal_html: str | None = None
+
+    if not force:
+        probe_res = probe(
+            check_url=cfg.general.check_url,
+            expect=cfg.general.check_expect,
+            allowed_hosts=cfg.general.allowed_hosts,
+        )
+        if probe_res.state == ConnectivityState.ONLINE:
+            if json_output:
+                typer.echo(
+                    json.dumps(
+                        {
+                            "status": "already_online",
+                            "message": "Already connected to internet.",
+                        },
+                        indent=2,
+                    )
+                )
+            else:
+                typer.secho(
+                    "✓ Already online: Full internet connectivity detected.",
+                    fg=typer.colors.GREEN,
+                    bold=True,
+                )
+                typer.echo("  No captive portal authentication required.")
+                typer.echo(
+                    "  Use `uniwifi login --force` to submit credentials anyway."
+                )
+            return
+
+        if probe_res.state == ConnectivityState.OFFLINE:
+            if json_output:
+                typer.echo(
+                    json.dumps(
+                        {"status": "offline", "error": probe_res.error},
+                        indent=2,
+                    )
+                )
+            else:
+                typer.secho("\nStatus: OFFLINE", bold=True, fg=typer.colors.RED)
+                typer.echo(
+                    f"  ✗ {probe_res.error or 'Unable to reach probe destination.'}"
+                )
+            raise typer.Exit(code=1)
+
+        portal_url = probe_res.portal_url or cfg.portal.login_url
+        portal_html = probe_res.html
+
+    if not portal_url:
+        portal_url = cfg.portal.login_url
+
+    if not portal_url:
+        typer.secho(
+            "✗ No captive portal landing URL could be resolved.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+    # 4. Handle --dry-run
+    if dry_run:
+        typer.secho("\n=== UniWiFi Login Dry-Run ===", bold=True, fg=typer.colors.CYAN)
+        typer.echo(f"  Portal URL: {portal_url}")
+        typer.echo(f"  Mode:       {cfg.portal.mode}")
+        typer.echo(f"  Username:   {final_user}")
+        if portal_html:
+            try:
+                form = autodetect_login_form(
+                    portal_html,
+                    portal_url,
+                    username_field_hint=cfg.portal.username_field,
+                    password_field_hint=cfg.portal.password_field,
+                )
+                typer.echo(f"  Target Action: {form.action_url}")
+                typer.echo(f"  Target Method: {form.method}")
+                typer.echo(f"  Hidden Fields: {list(form.hidden_fields.keys())}")
+            except Exception as e:
+                typer.echo(f"  Form scraping warning: {e}")
+        return
+
+    # 5. Submit credentials and verify
+    typer.echo(f"Submitting credentials for {final_user} to {portal_url}...")
+    try:
+        res = asyncio.run(
+            login_and_verify_async(
+                config=cfg,
+                username=final_user,
+                password=final_pass,
+                portal_url=portal_url,
+                html=portal_html,
+            )
+        )
+    except InvalidCredentialsError as err:
+        typer.secho(
+            "\n✗ Login rejected: Invalid username or password.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        typer.echo(
+            "  Immediate abort: Retries halted to prevent university account lockout."
+        )
+        raise typer.Exit(code=1) from err
+    except AccountLockedError as err:
+        typer.secho(
+            "\n✗ ACCOUNT LOCKED: Your university account is suspended or locked.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1) from err
+    except UntrustedHostError as err:
+        typer.secho(
+            f"\n✗ SECURITY ALERT: {err}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1) from err
+    except (PortalFormNotFoundError, AuthenticationFailedError) as err:
+        typer.secho(f"\n✗ Authentication failed: {err}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from err
+    except Exception as err:
+        typer.secho(f"\n✗ Unexpected error during login: {err}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from err
+
+    if json_output:
+        typer.echo(json.dumps(res.to_dict(), indent=2))
+        return
+
+    typer.secho("\n✓ Authenticated successfully!", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  Portal:  {res.landing_url}")
+    typer.echo(f"  Latency: {res.latency_ms:.1f} ms")
+    typer.echo("  Internet connectivity verified.")
 
 
 @app.command()
