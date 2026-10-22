@@ -5,6 +5,7 @@ from __future__ import annotations
 import typer
 
 from . import __version__
+from .config import CONFIG_PATH
 
 app = typer.Typer(
     name="uniwifi",
@@ -35,15 +36,373 @@ def main(
 
 
 @app.command()
-def setup() -> None:
-    """Store university Wi-Fi credentials in the system keyring."""
-    typer.echo("Credential setup will be implemented in Day 3.")
+def setup(
+    check: bool = typer.Option(
+        False,
+        "--check",
+        "-c",
+        help="Check if credentials are saved and inspect keyring backend status.",
+    ),
+    clear: bool = typer.Option(
+        False,
+        "--clear",
+        help="Delete saved credentials from the system keyring.",
+    ),
+    username: str | None = typer.Option(
+        None,
+        "--username",
+        "-u",
+        help="Provide username directly.",
+    ),
+    password: str | None = typer.Option(
+        None,
+        "--password",
+        "-p",
+        help="Provide password directly (warning: visible in shell history).",
+    ),
+) -> None:
+    """Store university credentials in system keyring and initialize configuration."""
+    from .config import init_default_config
+    from .credentials import (
+        check_keyring_backend,
+        delete,
+        exists,
+        get_username,
+        save,
+    )
+    from .recon import get_active_wifi_connections
+
+    if clear:
+        if exists():
+            delete()
+            typer.secho(
+                "✓ Credentials removed from system keyring.", fg=typer.colors.GREEN
+            )
+        else:
+            typer.echo("No credentials found in system keyring.")
+        return
+
+    if check:
+        status = check_keyring_backend()
+        typer.secho("\n=== Keyring Backend Status ===", bold=True, fg=typer.colors.CYAN)
+        typer.echo(f"  Backend:       {status.backend_name}")
+        typer.echo(f"  Usable:        {'Yes' if status.is_usable else 'No'}")
+        typer.echo(f"  Encrypted:     {'Yes' if status.is_encrypted else 'No'}")
+        typer.echo(f"  Message:       {status.message}")
+
+        if status.troubleshooting:
+            typer.secho(f"\n[!] Note: {status.troubleshooting}", fg=typer.colors.YELLOW)
+
+        if exists():
+            user = get_username() or "unknown"
+            typer.secho(
+                f"\n✓ Credentials stored for user: {user}",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+        else:
+            typer.secho(
+                "\n[-] No credentials saved yet. Run `uniwifi setup` to configure.",
+                fg=typer.colors.YELLOW,
+            )
+        return
+
+    # Check keyring backend health before prompting
+    keyring_info = check_keyring_backend()
+    if not keyring_info.is_usable:
+        typer.secho(
+            f"\n[!] Warning: {keyring_info.message}", fg=typer.colors.RED, bold=True
+        )
+        if keyring_info.troubleshooting:
+            typer.echo(keyring_info.troubleshooting)
+
+    typer.secho(
+        "\n=== UniWiFi AutoLogin Credential Setup ===", bold=True, fg=typer.colors.CYAN
+    )
+    typer.echo(
+        "Credentials will be securely encrypted in your OS keyring (libsecret).\n"
+    )
+
+    user_input = username or typer.prompt("University ID / Username")
+    pass_input = password or typer.prompt("Password", hide_input=True)
+
+    try:
+        save(user_input, pass_input)
+        typer.secho(
+            "✓ Credentials saved securely in system keyring.",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+    except Exception as err:
+        typer.secho(
+            f"Failed to save credentials: {err}", fg=typer.colors.RED, bold=True
+        )
+        raise typer.Exit(code=1) from err
+
+    # Ensure config file exists
+    if not CONFIG_PATH.exists():
+        detected_ssids = [c.name for c in get_active_wifi_connections()]
+        created_path = init_default_config(
+            path=CONFIG_PATH, ssids=detected_ssids or None
+        )
+        typer.secho(
+            f"✓ Initialized configuration file: {created_path}", fg=typer.colors.GREEN
+        )
+        typer.echo("  File permissions secured to 0600 (read/write by owner only).")
+        typer.echo(
+            "  Edit ~/.config/uniwifi/config.toml to customize SSIDs and portal settings."
+        )
+    else:
+        typer.echo(f"Configuration file exists: {CONFIG_PATH}")
+
+
+@app.command(name="config")
+def config_cmd(
+    show_path: bool = typer.Option(
+        False,
+        "--path",
+        "-p",
+        help="Print path to the configuration file.",
+    ),
+    validate: bool = typer.Option(
+        False,
+        "--validate",
+        "-v",
+        help="Validate configuration file against schema.",
+    ),
+    init: bool = typer.Option(
+        False,
+        "--init",
+        help="Initialize default config.toml if missing.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Display configuration in JSON format.",
+    ),
+) -> None:
+    """Inspect, validate, or initialize the uniwifi configuration file."""
+    import json
+    import stat
+
+    from .config import (
+        ConfigError,
+        init_default_config,
+        load,
+        validate_config,
+    )
+
+    if show_path:
+        typer.echo(str(CONFIG_PATH))
+        return
+
+    if init:
+        if CONFIG_PATH.exists():
+            typer.echo(f"Configuration file already exists: {CONFIG_PATH}")
+        else:
+            created = init_default_config(path=CONFIG_PATH)
+            typer.secho(
+                f"✓ Initialized configuration file: {created}",
+                fg=typer.colors.GREEN,
+            )
+        return
+
+    if not CONFIG_PATH.exists():
+        typer.secho(
+            f"Configuration file not found at: {CONFIG_PATH}",
+            fg=typer.colors.YELLOW,
+        )
+        typer.echo("Run `uniwifi config --init` or `uniwifi setup` to initialize it.")
+        raise typer.Exit(code=1)
+
+    try:
+        cfg = load(CONFIG_PATH, validate=False)
+    except ConfigError as err:
+        typer.secho(
+            f"Error reading configuration: {err}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1) from err
+
+    errors = validate_config(cfg)
+
+    if validate:
+        if errors:
+            typer.secho(
+                "\n✗ Configuration validation failed:",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+            for err in errors:
+                typer.echo(f"  - {err}")
+            raise typer.Exit(code=1)
+        else:
+            typer.secho(
+                "✓ Configuration is valid and passes all schema checks.",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+            return
+
+    if json_output:
+        typer.echo(json.dumps(cfg.to_dict(), indent=2))
+        return
+
+    file_mode = stat.S_IMODE(CONFIG_PATH.stat().st_mode)
+    perm_warning = (
+        ""
+        if file_mode == 0o600
+        else f" (Warning: permissions {oct(file_mode)} should be 0600)"
+    )
+
+    typer.secho(
+        "\n=== UniWiFi Configuration Settings ===",
+        bold=True,
+        fg=typer.colors.CYAN,
+    )
+    typer.echo(f"  Config Path:    {CONFIG_PATH}{perm_warning}")
+    typer.echo(
+        f"  SSIDs:          {', '.join(cfg.general.ssids) if cfg.general.ssids else '[None]'}"
+    )
+    typer.echo(f"  Check URL:      {cfg.general.check_url}")
+    typer.echo(f"  Check Expect:   {cfg.general.check_expect}")
+    typer.echo(f"  Resume Delay:   {cfg.general.resume_delay_seconds}s")
+    typer.echo(f"  Max Attempts:   {cfg.general.max_attempts}")
+    typer.echo(f"  Backoff Base:   {cfg.general.backoff_base_seconds}s")
+    typer.echo(f"  Notifications:  {'Enabled' if cfg.general.notify else 'Disabled'}")
+    typer.echo(
+        f"  Allowed Hosts:  {', '.join(cfg.general.allowed_hosts) if cfg.general.allowed_hosts else '[Any]'}"
+    )
+
+    typer.secho(
+        "\n=== Portal Authentication Settings ===",
+        bold=True,
+        fg=typer.colors.CYAN,
+    )
+    typer.echo(f"  Mode:           {cfg.portal.mode}")
+    typer.echo(
+        f"  Login URL:      {cfg.portal.login_url or '[Auto-detected via probe]'}"
+    )
+    typer.echo(f"  Method:         {cfg.portal.method}")
+    typer.echo(f"  Username Field: {cfg.portal.username_field}")
+    typer.echo(f"  Password Field: {cfg.portal.password_field}")
+    typer.echo(
+        f"  Scrape Hidden:  {'Enabled' if cfg.portal.scrape_hidden_fields else 'Disabled'}"
+    )
+    typer.echo(
+        f"  Verify TLS:     {'Enabled' if cfg.portal.verify_tls else 'Disabled'}"
+    )
+
+    if errors:
+        typer.secho("\n[!] Configuration Warnings:", fg=typer.colors.YELLOW, bold=True)
+        for err in errors:
+            typer.echo(f"  - {err}")
 
 
 @app.command()
-def status() -> None:
+def status(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Display status in JSON format.",
+    ),
+    timeout: float = typer.Option(
+        5.0,
+        "--timeout",
+        "-t",
+        help="Probe timeout in seconds.",
+    ),
+    probe_url: str | None = typer.Option(
+        None,
+        "--probe-url",
+        "-p",
+        help="Custom HTTP URL to probe for connectivity/interception.",
+    ),
+) -> None:
     """Show whether current connection is online or behind a portal."""
-    typer.echo("Portal detection status will be implemented in Day 4.")
+    import json
+
+    from .config import CONFIG_PATH, load
+    from .detector import (
+        DEFAULT_CHECK_EXPECT,
+        DEFAULT_CHECK_URL,
+        ConnectivityState,
+        probe,
+    )
+    from .recon import get_active_wifi_connections
+
+    check_url = DEFAULT_CHECK_URL
+    check_expect = DEFAULT_CHECK_EXPECT
+    allowed_hosts: list[str] = []
+
+    if CONFIG_PATH.exists():
+        try:
+            cfg = load(CONFIG_PATH, validate=False)
+            check_url = cfg.general.check_url
+            check_expect = cfg.general.check_expect
+            allowed_hosts = cfg.general.allowed_hosts
+        except Exception:
+            pass
+
+    if probe_url:
+        check_url = probe_url
+
+    active_conns = get_active_wifi_connections()
+
+    result = probe(
+        check_url=check_url,
+        expect=check_expect,
+        timeout=timeout,
+        allowed_hosts=allowed_hosts,
+    )
+
+    if json_output:
+        payload = {
+            "active_wifi": [c.to_dict() for c in active_conns],
+            "probe": result.to_dict(),
+        }
+        typer.echo(json.dumps(payload, indent=2))
+        if result.state == ConnectivityState.ONLINE:
+            return
+        elif result.state == ConnectivityState.PORTAL:
+            raise typer.Exit(code=2)
+        else:
+            raise typer.Exit(code=1)
+
+    typer.secho(
+        "\n=== UniWiFi Connectivity Status ===", bold=True, fg=typer.colors.CYAN
+    )
+    if active_conns:
+        conn_strs = [f"{c.name} ({c.device})" for c in active_conns]
+        typer.echo(f"  Active Wi-Fi:   {', '.join(conn_strs)}")
+    else:
+        typer.echo("  Active Wi-Fi:   [None / Not connected]")
+
+    typer.echo(f"  Probe Target:   {check_url}")
+    typer.echo(f"  Latency:        {result.latency_ms:.1f} ms")
+
+    if result.state == ConnectivityState.ONLINE:
+        typer.secho("\nStatus: ONLINE", bold=True, fg=typer.colors.GREEN)
+        typer.echo("  ✓ Full internet connectivity detected.")
+        typer.echo("  No captive portal authentication required.")
+    elif result.state == ConnectivityState.PORTAL:
+        typer.secho(
+            "\nStatus: BEHIND CAPTIVE PORTAL", bold=True, fg=typer.colors.YELLOW
+        )
+        typer.echo(f"  ✗ Intercepted by: {result.portal_url}")
+        if not result.trusted_host:
+            typer.secho(
+                "  [!] WARNING: Portal domain is not in allowed_hosts!",
+                bold=True,
+                fg=typer.colors.RED,
+            )
+        typer.echo("  Run `uniwifi login` to authenticate.")
+        raise typer.Exit(code=2)
+    else:
+        typer.secho("\nStatus: OFFLINE", bold=True, fg=typer.colors.RED)
+        typer.echo(f"  ✗ {result.error or 'Unable to reach probe destination.'}")
+        raise typer.Exit(code=1)
 
 
 @app.command()

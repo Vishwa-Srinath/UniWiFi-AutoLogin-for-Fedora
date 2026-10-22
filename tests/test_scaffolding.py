@@ -26,12 +26,13 @@ def test_cli_help_flag() -> None:
     """Verify --help includes all expected subcommands."""
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ["setup", "status", "login", "run", "recon"]:
+    for cmd in ["setup", "status", "login", "run", "recon", "config"]:
         assert cmd in result.stdout
 
 
 def test_cli_subcommand_stubs() -> None:
-    """Verify stub commands execute with exit code 0."""
-    for cmd in ["setup", "status", "login", "run"]:
+    """Verify remaining stub commands execute with exit code 0."""
+    assert runner.invoke(app, ["setup", "--check"]).exit_code == 0
+    for cmd in ["login", "run"]:
         result = runner.invoke(app, [cmd])
         assert result.exit_code == 0
