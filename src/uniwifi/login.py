@@ -206,3 +206,86 @@ def autodetect_login_form(
         hidden_fields=hidden_fields,
         extra_inputs=extra_inputs,
     )
+
+
+# Error patterns that indicate bad credentials requiring immediate abort
+INVALID_CREDENTIAL_PATTERNS = [
+    r"invalid\s+(?:username|password|credentials|user\s+id)",
+    r"authentication\s+failed",
+    r"incorrect\s+(?:password|username|credentials)",
+    r"login\s+failed",
+    r"user(?:name)?\s+(?:not\s+found|does\s+not\s+exist)",
+    r"bad\s+(?:credentials|password|user)",
+    r"wrong\s+password",
+    r"access\s+denied",
+    r"bad\s+username\s+or\s+password",
+    r"password\s+(?:is\s+)?incorrect",
+]
+
+# Error patterns that indicate account suspension/lockout
+ACCOUNT_LOCKED_PATTERNS = [
+    r"account\s+(?:is\s+)?(?:locked|disabled|suspended|blocked)",
+    r"too\s+many\s+(?:failed\s+)?attempts",
+    r"temporarily\s+locked",
+    r"maximum\s+login\s+attempts",
+    r"contact\s+your\s+administrator",
+]
+
+# Success indicator patterns
+SUCCESS_INDICATOR_PATTERNS = [
+    r"you\s+are\s+now\s+connected",
+    r"login\s+successful",
+    r"authentication\s+successful",
+    r"connection\s+established",
+    r"logged\s+in\s+successfully",
+    r"welcome\s+to\s+the\s+network",
+    r"access\s+granted",
+    r"logout",
+]
+
+
+def inspect_login_response(
+    html: str | None,
+    status_code: int,
+    success_contains: str | None = None,
+) -> bool:
+    """Analyze response HTML and status code after login submission.
+
+    Raises:
+        AccountLockedError: If portal explicitly reports the account is locked.
+        InvalidCredentialsError: If portal reports invalid credentials.
+
+    Returns:
+        True if success markers or valid redirect occurred, False otherwise.
+    """
+    text = (html or "").lower()
+
+    # 1. First check account lockout (highest urgency)
+    for pattern in ACCOUNT_LOCKED_PATTERNS:
+        if re.search(pattern, text, re.I):
+            raise AccountLockedError(
+                "University captive portal reported account is locked or suspended."
+            )
+
+    # 2. Check invalid credentials (immediate abort to prevent lockout)
+    for pattern in INVALID_CREDENTIAL_PATTERNS:
+        if re.search(pattern, text, re.I):
+            raise InvalidCredentialsError(
+                "University captive portal reported invalid username or password."
+            )
+
+    # 3. Check explicit success_contains string if configured
+    if success_contains and success_contains.strip():
+        return success_contains.lower() in text
+
+    # 4. Check standard success indicator phrases
+    for pattern in SUCCESS_INDICATOR_PATTERNS:
+        if re.search(pattern, text, re.I):
+            return True
+
+    # 5. HTTP Redirects (302/303) are common success indicators in captive portals
+    if status_code in (301, 302, 303, 307, 308):
+        return True
+
+    # 6. HTTP 200 without failure signatures
+    return status_code == 200
