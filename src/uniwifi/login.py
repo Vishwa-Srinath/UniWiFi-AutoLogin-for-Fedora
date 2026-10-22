@@ -7,11 +7,16 @@ and credential submission against campus captive portals.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
+import httpx
 from bs4 import BeautifulSoup, Tag
+
+from .config import Portal
+from .detector import UntrustedHostError, is_host_allowed
 
 
 class LoginError(Exception):
@@ -289,3 +294,126 @@ def inspect_login_response(
 
     # 6. HTTP 200 without failure signatures
     return status_code == 200
+
+
+async def login_async(
+    portal: Portal,
+    portal_url: str,
+    html: str | None = None,
+    username: str = "",
+    password: str = "",
+    allowed_hosts: list[str] | None = None,
+    timeout: float = 10.0,
+    client: httpx.AsyncClient | None = None,
+) -> LoginResult:
+    """Submit credentials to the university captive portal.
+
+    Supports both mode='form' (automatic scraping of action, tokens, and inputs)
+    and mode='custom' (explicit field mapping).
+    """
+    if not is_host_allowed(portal_url, allowed_hosts):
+        parsed = urlparse(portal_url)
+        raise UntrustedHostError(
+            f"Captive portal host '{parsed.hostname}' is not in allowed_hosts: {allowed_hosts}"
+        )
+
+    start_time = time.perf_counter()
+
+    async def _execute_login(http: httpx.AsyncClient) -> LoginResult:
+        current_html = html
+        current_url = portal_url
+
+        # 1. Fetch initial portal HTML if not provided (establishes session cookies/CSRF)
+        if not current_html or not current_html.strip():
+            resp = await http.get(current_url)
+            current_html = resp.text
+            current_url = str(resp.url)
+
+        # 2. Resolve form and payload based on portal mode
+        payload: dict[str, str] = {}
+        if portal.mode == "custom":
+            action_url = portal.login_url or current_url
+            method = portal.method.upper()
+
+            if portal.scrape_hidden_fields and current_html:
+                try:
+                    detected = autodetect_login_form(
+                        current_html,
+                        current_url,
+                        username_field_hint=portal.username_field,
+                        password_field_hint=portal.password_field,
+                    )
+                    payload.update(detected.hidden_fields)
+                    payload.update(detected.extra_inputs)
+                except PortalFormNotFoundError:
+                    pass
+
+            payload.update(portal.extra_fields)
+            payload[portal.username_field] = username
+            payload[portal.password_field] = password
+        else:
+            # Mode "form" (default)
+            detected = autodetect_login_form(
+                current_html,
+                current_url,
+                username_field_hint=portal.username_field,
+                password_field_hint=portal.password_field,
+            )
+            action_url = detected.action_url
+            method = detected.method
+
+            if portal.scrape_hidden_fields:
+                payload.update(detected.hidden_fields)
+            payload.update(detected.extra_inputs)
+            payload.update(portal.extra_fields)
+            payload[detected.username_field] = username
+            payload[detected.password_field] = password
+
+        # 3. Host safety check on target action_url
+        if not is_host_allowed(action_url, allowed_hosts):
+            parsed_action = urlparse(action_url)
+            raise UntrustedHostError(
+                f"Form action target '{parsed_action.hostname}' is not in allowed_hosts: {allowed_hosts}"
+            )
+
+        # 4. Construct request headers
+        parsed_origin = urlparse(current_url)
+        headers = {
+            "User-Agent": "UniWiFi-AutoLogin/0.1.0 (Fedora Linux; CaptivePortalClient)",
+            "Referer": current_url,
+            "Origin": f"{parsed_origin.scheme}://{parsed_origin.netloc}",
+        }
+
+        # 5. Submit credentials
+        if method == "GET":
+            post_resp = await http.get(action_url, params=payload, headers=headers)
+        else:
+            post_resp = await http.post(action_url, data=payload, headers=headers)
+
+        latency_ms = (time.perf_counter() - start_time) * 1000.0
+
+        # 6. Inspect response for success markers or lockout signatures
+        success = inspect_login_response(
+            post_resp.text,
+            post_resp.status_code,
+            success_contains=portal.success_contains,
+        )
+
+        return LoginResult(
+            success=success,
+            status_code=post_resp.status_code,
+            landing_url=str(post_resp.url),
+            response_html=post_resp.text,
+            latency_ms=latency_ms,
+            extra={"action_url": action_url, "method": method},
+        )
+
+    if client is not None:
+        return await _execute_login(client)
+
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        verify=portal.verify_tls,
+        follow_redirects=True,
+    ) as http:
+        return await _execute_login(http)
