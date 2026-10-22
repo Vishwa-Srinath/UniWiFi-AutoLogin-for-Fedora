@@ -186,9 +186,13 @@ async def probe_async(
                     trusted_host=trusted,
                 )
 
-            # Case 2: Clean 200 OK without redirects matching expected body
+            # Case 2: Clean 200 OK or 204 No Content without redirects matching expected body
+            heuristic_url = detect_portal_heuristics(html, final_url)
             clean_success = (
-                status_code == 200 and not response.history and html.strip() == expect
+                (status_code == 200 or status_code == 204)
+                and not response.history
+                and not heuristic_url
+                and (expect in html.strip() if expect else True)
             )
 
             if clean_success:
@@ -204,7 +208,6 @@ async def probe_async(
                 )
 
             # Case 3: Captive portal intercepted (via redirects, altered body, or heuristics)
-            heuristic_url = detect_portal_heuristics(html, final_url)
             portal_url = (
                 heuristic_url
                 or (final_url if final_url != check_url else None)
