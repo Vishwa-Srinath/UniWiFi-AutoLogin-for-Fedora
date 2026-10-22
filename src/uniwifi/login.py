@@ -330,7 +330,10 @@ async def login_async(
         current_url = portal_url
 
         # 1. Fetch initial portal HTML if not provided (establishes session cookies/CSRF)
-        if not current_html or not current_html.strip():
+        need_initial_get = (not current_html or not current_html.strip()) and (
+            portal.mode == "form" or portal.scrape_hidden_fields
+        )
+        if need_initial_get:
             resp = await http.get(current_url)
             current_html = resp.text
             current_url = str(resp.url)
