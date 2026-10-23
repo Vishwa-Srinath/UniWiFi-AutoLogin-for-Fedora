@@ -33,8 +33,20 @@ def main(
         callback=version_callback,
         is_eager=True,
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-d",
+        help="Enable verbose debug logging output.",
+    ),
 ) -> None:
     """UniWiFi AutoLogin: Automatic captive portal authentication on Fedora."""
+    import logging
+
+    from .log import setup_logging
+
+    level = logging.DEBUG if verbose else logging.INFO
+    setup_logging(level=level)
 
 
 @app.command()
@@ -760,6 +772,103 @@ def recon(
         typer.echo(probe_result.full_html)
     elif probe_result.html_preview:
         typer.echo(f"\n  HTML Preview:   {probe_result.html_preview[:160]}...")
+
+
+@app.command()
+def notify(
+    title: str = typer.Option(
+        "UniWiFi Notification Test",
+        "--title",
+        "-t",
+        help="Notification summary title.",
+    ),
+    body: str = typer.Option(
+        "Desktop notifications are active and working correctly.",
+        "--body",
+        "-b",
+        help="Notification message body.",
+    ),
+    kind: str = typer.Option(
+        "test",
+        "--kind",
+        "-k",
+        help="Notification kind: test, success, fail, lockout, portal, untrusted.",
+    ),
+    urgency: str = typer.Option(
+        "normal",
+        "--urgency",
+        "-u",
+        help="Urgency level: low, normal, critical.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Force delivery even if headless environment is detected.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output NotificationResult as JSON.",
+    ),
+) -> None:
+    """Send or test desktop notifications via libnotify / notify-send."""
+    import json
+
+    from .notify import (
+        NotificationResult,
+        notify_login_failed,
+        notify_login_success,
+        notify_portal_detected,
+        notify_untrusted_host,
+        send,
+    )
+
+    res: NotificationResult
+    if kind == "success":
+        res = notify_login_success(ssid="Campus-WiFi", latency_ms=42.0, force=force)
+    elif kind == "fail":
+        res = notify_login_failed(
+            reason="Connection timed out", ssid="Campus-WiFi", force=force
+        )
+    elif kind == "lockout":
+        res = notify_login_failed(
+            reason="Invalid credentials", is_lockout=True, force=force
+        )
+    elif kind == "portal":
+        res = notify_portal_detected(ssid="Campus-WiFi", force=force)
+    elif kind == "untrusted":
+        res = notify_untrusted_host(host="evil-portal.phishing.org", force=force)
+    else:
+        res = send(
+            title=title,
+            body=body,
+            urgency=urgency,
+            force=force,
+        )
+
+    if json_output:
+        typer.echo(json.dumps(res.to_dict(), indent=2))
+        return
+
+    if res.sent:
+        typer.secho(
+            "✓ Notification dispatched successfully!", fg=typer.colors.GREEN, bold=True
+        )
+        if res.command:
+            typer.echo(f"  Command: {' '.join(res.command)}")
+    elif res.skipped_reason:
+        typer.secho(
+            f"[!] Notification skipped: {res.skipped_reason}", fg=typer.colors.YELLOW
+        )
+        typer.echo("  Use --force to attempt dispatch regardless of environment.")
+    else:
+        typer.secho(
+            f"✗ Failed to send notification: {res.error}",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
