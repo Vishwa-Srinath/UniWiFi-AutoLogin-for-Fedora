@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from typer.testing import CliRunner
 
+from uniwifi.cli import app
 from uniwifi.events import (
     LOGIN1_BUS_NAME,
     LOGIN1_MANAGER_IFACE,
@@ -419,3 +422,86 @@ def test_inspect_system_dbus_sync_wrapper() -> None:
     assert report["dbus_connected"] is True
     assert report["networkmanager"]["connectivity"] == 2
     assert report["networkmanager"]["connectivity_state"] == "PORTAL"
+
+
+def test_cli_events_check_json() -> None:
+    """Verify uniwifi events --check --json returns valid JSON diagnostics."""
+    runner = CliRunner()
+    mock_report = {
+        "dbus_connected": True,
+        "networkmanager": {
+            "available": True,
+            "connectivity": 4,
+            "connectivity_state": "FULL",
+            "error": None,
+        },
+        "logind": {"available": True, "error": None},
+        "error": None,
+    }
+    with patch("uniwifi.events.inspect_system_dbus_sync", return_value=mock_report):
+        result = runner.invoke(app, ["events", "--check", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["dbus_connected"] is True
+    assert data["networkmanager"]["connectivity_state"] == "FULL"
+
+
+def test_cli_events_check_text() -> None:
+    """Verify uniwifi events --check prints readable diagnostic status table."""
+    runner = CliRunner()
+    mock_report = {
+        "dbus_connected": True,
+        "networkmanager": {
+            "available": True,
+            "connectivity": 2,
+            "connectivity_state": "PORTAL",
+            "error": None,
+        },
+        "logind": {"available": True, "error": None},
+        "error": None,
+    }
+    with patch("uniwifi.events.inspect_system_dbus_sync", return_value=mock_report):
+        result = runner.invoke(app, ["events", "--check"])
+
+    assert result.exit_code == 0
+    assert "System D-Bus Status" in result.stdout
+    assert "CONNECTED" in result.stdout
+    assert "PORTAL" in result.stdout
+
+
+def test_cli_events_check_failure() -> None:
+    """Verify uniwifi events --check exits with code 1 if D-Bus is unreachable."""
+    runner = CliRunner()
+    mock_report = {
+        "dbus_connected": False,
+        "networkmanager": {"available": False, "error": "Bus error"},
+        "logind": {"available": False, "error": "Bus error"},
+        "error": "Failed to connect to system bus",
+    }
+    with patch("uniwifi.events.inspect_system_dbus_sync", return_value=mock_report):
+        result = runner.invoke(app, ["events", "--check"])
+
+    assert result.exit_code == 1
+    assert "FAILED" in result.stdout
+
+
+def test_cli_events_listen_timeout() -> None:
+    """Verify uniwifi events listens and exits cleanly after specified timeout."""
+    runner = CliRunner()
+
+    class DummyEvents:
+        def __init__(self, on_trigger: Any = None) -> None:
+            self.on_trigger = on_trigger
+
+        async def __aenter__(self) -> DummyEvents:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+            pass
+
+    with patch("uniwifi.events.Events", DummyEvents):
+        result = runner.invoke(app, ["events", "--timeout", "0.01"])
+
+    assert result.exit_code == 0
+    assert "Listening for D-Bus events" in result.stdout

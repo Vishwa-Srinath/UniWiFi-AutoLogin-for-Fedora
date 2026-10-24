@@ -871,5 +871,121 @@ def notify(
         raise typer.Exit(code=1)
 
 
+@app.command()
+def events(
+    check: bool = typer.Option(
+        False,
+        "--check",
+        "-c",
+        help="Inspect system D-Bus, NetworkManager, and systemd-logind availability.",
+    ),
+    timeout: float = typer.Option(
+        10.0,
+        "--timeout",
+        "-t",
+        help="Seconds to listen for live events (0 for indefinite).",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        "-j",
+        help="Format output as JSON.",
+    ),
+) -> None:
+    """Monitor live D-Bus events from NetworkManager and systemd-logind."""
+    import asyncio
+    import json
+    import time
+
+    from .events import DBusEvent, Events, inspect_system_dbus_sync
+
+    if check:
+        report = inspect_system_dbus_sync()
+        if json_output:
+            typer.echo(json.dumps(report, indent=2))
+            if not report.get("dbus_connected"):
+                raise typer.Exit(code=1)
+            return
+
+        typer.secho("=== System D-Bus Status ===", bold=True)
+        if report.get("dbus_connected"):
+            typer.secho("  System Bus:     CONNECTED", fg=typer.colors.GREEN)
+        else:
+            typer.secho(
+                f"  System Bus:     FAILED ({report.get('error')})",
+                fg=typer.colors.RED,
+            )
+
+        nm = report.get("networkmanager", {})
+        if nm.get("available"):
+            state = f"{nm.get('connectivity_state')} ({nm.get('connectivity')})"
+            typer.secho(
+                f"  NetworkManager: AVAILABLE [Connectivity: {state}]",
+                fg=typer.colors.GREEN,
+            )
+        else:
+            err = nm.get("error") or "not found"
+            typer.secho(
+                f"  NetworkManager: UNAVAILABLE ({err})", fg=typer.colors.YELLOW
+            )
+
+        login = report.get("logind", {})
+        if login.get("available"):
+            typer.secho("  systemd-logind: AVAILABLE", fg=typer.colors.GREEN)
+        else:
+            err = login.get("error") or "not found"
+            typer.secho(
+                f"  systemd-logind: UNAVAILABLE ({err})", fg=typer.colors.YELLOW
+            )
+
+        if not report.get("dbus_connected"):
+            raise typer.Exit(code=1)
+        return
+
+    async def _listen() -> None:
+        def on_event(event: DBusEvent) -> None:
+            if json_output:
+                typer.echo(json.dumps(event.to_dict()))
+            else:
+                ts = time.strftime("%H:%M:%S", time.localtime(event.timestamp))
+                typer.secho(
+                    f"[{ts}] Event: {event.event_type.value} (source: {event.source})",
+                    fg=typer.colors.CYAN,
+                    bold=True,
+                )
+                if event.details:
+                    typer.echo(f"       Details: {event.details}")
+
+        if not json_output:
+            typer.secho(
+                "Listening for D-Bus events (NetworkManager, systemd-logind)...",
+                bold=True,
+            )
+            if timeout > 0:
+                typer.echo(
+                    f"Listener will terminate after {timeout} seconds (Ctrl+C to abort)."
+                )
+            else:
+                typer.echo("Listening indefinitely (Ctrl+C to abort)...")
+
+        ev_listener = Events(on_trigger=on_event)
+        try:
+            async with ev_listener:
+                if timeout > 0:
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(asyncio.sleep(timeout), timeout=timeout)
+                else:
+                    while True:
+                        await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            pass
+
+    try:
+        asyncio.run(_listen())
+    except KeyboardInterrupt:
+        if not json_output:
+            typer.echo("\nStopped listening for events.")
+
+
 if __name__ == "__main__":
     app()
