@@ -96,12 +96,16 @@ class Events:
         self,
         on_trigger: EventCallback | None = None,
         bus: MessageBus | None = None,
+        resume_settle_delay: float = DEFAULT_RESUME_SETTLE_DELAY,
     ) -> None:
         self.on_trigger = on_trigger
         self.bus: MessageBus | None = bus
+        self.resume_settle_delay = resume_settle_delay
         self.nm_obj: Any = None
         self.nm_iface: Any = None
         self.props_iface: Any = None
+        self.logind_obj: Any = None
+        self.logind_mgr: Any = None
         self._connected: bool = False
 
     @property
@@ -128,6 +132,60 @@ class Events:
             raise DBusSubscriptionError(
                 f"Failed to subscribe to NetworkManager D-Bus: {err}"
             ) from err
+
+    async def _setup_logind(self) -> None:
+        """Introspect and bind to systemd-logind Manager interface."""
+        if not self.bus:
+            raise DBusConnectionError("Cannot setup logind: D-Bus not connected")
+
+        try:
+            intro = await self.bus.introspect(LOGIN1_BUS_NAME, LOGIN1_OBJECT_PATH)
+            self.logind_obj = self.bus.get_proxy_object(
+                LOGIN1_BUS_NAME, LOGIN1_OBJECT_PATH, intro
+            )
+            self.logind_mgr = self.logind_obj.get_interface(LOGIN1_MANAGER_IFACE)
+
+            self.logind_mgr.on_prepare_for_sleep(self._handle_prepare_for_sleep)
+            log.info("Subscribed to systemd-logind PrepareForSleep signal")
+        except Exception as err:
+            raise DBusSubscriptionError(
+                f"Failed to subscribe to systemd-logind D-Bus: {err}"
+            ) from err
+
+    def _handle_prepare_for_sleep(self, starting: bool) -> None:
+        """Handle PrepareForSleep signal from systemd-logind."""
+        if starting:
+            log.info("System preparing for sleep...")
+            event = DBusEvent(
+                event_type=EventType.SLEEPING,
+                source="logind",
+                details={"starting": True},
+            )
+            asyncio.create_task(self.dispatch_event(event))
+        else:
+            log.info("System resumed from sleep")
+            asyncio.create_task(self._after_resume())
+
+    async def _after_resume(self, delay: float | None = None) -> None:
+        """Wait for Wi-Fi hardware to settle after resume, re-check connectivity, and trigger daemon."""
+        settle = delay if delay is not None else self.resume_settle_delay
+        log.info(
+            "Waiting %.1fs for Wi-Fi hardware to re-associate after resume...", settle
+        )
+        if settle > 0:
+            await asyncio.sleep(settle)
+
+        try:
+            await self.check_connectivity()
+        except Exception as err:
+            log.warning("CheckConnectivity after resume encountered warning: %s", err)
+
+        event = DBusEvent(
+            event_type=EventType.RESUME,
+            source="logind",
+            details={"delay_seconds": settle},
+        )
+        await self.dispatch_event(event)
 
     def _handle_nm_properties_changed(
         self,
