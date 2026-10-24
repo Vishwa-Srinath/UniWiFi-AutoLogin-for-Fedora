@@ -7,6 +7,7 @@ systemd-logind sleep/resume events to automatically wake up the daemon.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -342,3 +343,79 @@ class Events:
                 log.exception("Error executing event callback: %s", err)
         except Exception as err:
             log.exception("Error executing event callback: %s", err)
+
+
+async def inspect_system_dbus(bus: MessageBus | None = None) -> dict[str, Any]:
+    """Inspect system D-Bus availability and probe NetworkManager and systemd-logind.
+
+    Returns a diagnostic dictionary detailing bus connection, NetworkManager
+    availability and connectivity status, and systemd-logind availability.
+    """
+    report: dict[str, Any] = {
+        "dbus_connected": False,
+        "networkmanager": {
+            "available": False,
+            "connectivity": None,
+            "connectivity_state": None,
+            "error": None,
+        },
+        "logind": {
+            "available": False,
+            "error": None,
+        },
+        "error": None,
+    }
+
+    own_bus = False
+    active_bus = bus
+    if active_bus is None:
+        try:
+            active_bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            own_bus = True
+        except Exception as err:
+            report["error"] = str(err)
+            return report
+
+    report["dbus_connected"] = True
+
+    try:
+        # Check NetworkManager
+        try:
+            intro_nm = await active_bus.introspect(NM_BUS_NAME, NM_OBJECT_PATH)
+            proxy_nm = active_bus.get_proxy_object(
+                NM_BUS_NAME, NM_OBJECT_PATH, intro_nm
+            )
+            props_iface = proxy_nm.get_interface(DBUS_PROPERTIES_IFACE)
+            res = await props_iface.call_get(NM_BUS_NAME, "Connectivity")
+            conn_int = int(getattr(res, "value", res))
+            try:
+                conn_name = NMConnectivity(conn_int).name
+            except ValueError:
+                conn_name = f"UNKNOWN({conn_int})"
+
+            report["networkmanager"]["available"] = True
+            report["networkmanager"]["connectivity"] = conn_int
+            report["networkmanager"]["connectivity_state"] = conn_name
+        except Exception as err:
+            report["networkmanager"]["error"] = str(err)
+
+        # Check systemd-logind
+        try:
+            intro_login = await active_bus.introspect(
+                LOGIN1_BUS_NAME, LOGIN1_OBJECT_PATH
+            )
+            report["logind"]["available"] = intro_login is not None
+        except Exception as err:
+            report["logind"]["error"] = str(err)
+
+    finally:
+        if own_bus and active_bus is not None:
+            with contextlib.suppress(Exception):
+                active_bus.disconnect()
+
+    return report
+
+
+def inspect_system_dbus_sync(bus: MessageBus | None = None) -> dict[str, Any]:
+    """Synchronous wrapper for inspect_system_dbus."""
+    return asyncio.run(inspect_system_dbus(bus=bus))
