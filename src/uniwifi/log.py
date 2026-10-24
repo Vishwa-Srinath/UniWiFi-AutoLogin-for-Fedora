@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from typing import Any, TextIO
+from typing import TextIO
 
 JOURNALD_FORMAT = "%(levelname)s %(name)s: %(message)s"
 STANDARD_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -26,9 +26,9 @@ QUIET_LOGGERS = (
 REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
-            r"(?i)(password|passwd|pwd|secret|auth_pass|access_token|refresh_token|csrf_token)\s*([=:])\s*(['\"]?)([^'\"&\s,]{1,128})\3"
+            r"(?i)(['\"]?)(password|passwd|pwd|secret|auth_pass|access_token|refresh_token|csrf_token)\1(\s*[:=]\s*)(['\"]?)[^'\"&\s,]{1,128}\4"
         ),
-        r"\1\2\3***REDACTED***\3",
+        r"\1\2\1\3\4***REDACTED***\4",
     ),
     (
         re.compile(r"(?i)(bearer\s+)[a-zA-Z0-9_\-\.]{8,}"),
@@ -50,26 +50,11 @@ def redact_sensitive_text(text: str) -> str:
 
 
 class RedactingFilter(logging.Filter):
-    """Logging filter that scrubs sensitive strings from LogRecord messages and arguments."""
+    """Logging filter that scrubs sensitive strings from LogRecords."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str):
+        if not record.args and isinstance(record.msg, str):
             record.msg = redact_sensitive_text(record.msg)
-
-        if record.args:
-            if isinstance(record.args, dict):
-                clean_args: dict[str, Any] = {}
-                for k, v in record.args.items():
-                    if isinstance(v, str):
-                        clean_args[k] = redact_sensitive_text(v)
-                    else:
-                        clean_args[k] = v
-                record.args = clean_args
-            elif isinstance(record.args, tuple):
-                record.args = tuple(
-                    redact_sensitive_text(a) if isinstance(a, str) else a
-                    for a in record.args
-                )
         return True
 
 
