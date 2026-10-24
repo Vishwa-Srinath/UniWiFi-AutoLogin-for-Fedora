@@ -159,3 +159,127 @@ def send(
             returncode=-1,
             error=f"Failed to execute notify-send: {err}",
         )
+
+
+def notify_login_success(
+    ssid: str | None = None,
+    latency_ms: float | None = None,
+    enabled: bool = True,
+    force: bool = False,
+) -> NotificationResult:
+    """Notify the user of successful captive portal login and internet access."""
+    if not enabled and not force:
+        return NotificationResult(
+            sent=False,
+            skipped_reason="Disabled in configuration (notify = false)",
+        )
+
+    title = "Wi-Fi Connected"
+    net_name = f" to '{ssid}'" if ssid else ""
+    latency_info = f" ({latency_ms:.0f} ms latency)" if latency_ms is not None else ""
+    body = (
+        f"Successfully authenticated{net_name}. Internet access verified{latency_info}."
+    )
+
+    return send(
+        title=title,
+        body=body,
+        urgency=NotificationUrgency.LOW,
+        timeout_ms=4000,
+        icon="network-wireless",
+        force=force,
+    )
+
+
+def notify_login_failed(
+    reason: str,
+    ssid: str | None = None,
+    is_lockout: bool = False,
+    enabled: bool = True,
+    force: bool = False,
+) -> NotificationResult:
+    """Notify the user of failed captive portal login or university account lockout."""
+    if not enabled and not force:
+        return NotificationResult(
+            sent=False,
+            skipped_reason="Disabled in configuration (notify = false)",
+        )
+
+    if is_lockout:
+        title = "ACCOUNT LOCKED: Wi-Fi Login Aborted"
+        body = (
+            f"Authentication failed: {reason}. "
+            "Automated attempts halted to prevent university IT account lockout."
+        )
+        urgency = NotificationUrgency.CRITICAL
+        icon = "dialog-error"
+    else:
+        net_str = f" on '{ssid}'" if ssid else ""
+        title = "Wi-Fi Login Failed"
+        body = f"Could not authenticate{net_str}: {reason}"
+        urgency = NotificationUrgency.CRITICAL
+        icon = "dialog-warning"
+
+    return send(
+        title=title,
+        body=body,
+        urgency=urgency,
+        timeout_ms=8000 if is_lockout else 6000,
+        icon=icon,
+        force=force,
+    )
+
+
+def notify_portal_detected(
+    ssid: str | None = None,
+    portal_url: str | None = None,
+    enabled: bool = True,
+    force: bool = False,
+) -> NotificationResult:
+    """Notify the user that a captive portal was intercepted and authentication is starting."""
+    if not enabled and not force:
+        return NotificationResult(
+            sent=False,
+            skipped_reason="Disabled in configuration (notify = false)",
+        )
+
+    net_name = f"'{ssid}'" if ssid else "network"
+    title = "Captive Portal Detected"
+    body = f"Logging in to {net_name}..."
+
+    return send(
+        title=title,
+        body=body,
+        urgency=NotificationUrgency.LOW,
+        timeout_ms=3000,
+        icon="network-wireless-acquiring",
+        force=force,
+    )
+
+
+def notify_untrusted_host(
+    host: str,
+    enabled: bool = True,
+    force: bool = False,
+) -> NotificationResult:
+    """Alert the user that a potential rogue AP or untrusted portal domain was intercepted."""
+    if not enabled and not force:
+        return NotificationResult(
+            sent=False,
+            skipped_reason="Disabled in configuration (notify = false)",
+        )
+
+    title = "SECURITY ALERT: Untrusted Portal"
+    body = (
+        f"Aborted authentication: '{host}' is not in allowed_hosts. "
+        "Credentials withheld to prevent phishing."
+    )
+
+    return send(
+        title=title,
+        body=body,
+        urgency=NotificationUrgency.CRITICAL,
+        timeout_ms=10000,
+        icon="dialog-error",
+        force=force,
+    )
