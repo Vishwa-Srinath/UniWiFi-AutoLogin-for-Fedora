@@ -231,3 +231,130 @@ def test_notification_result_to_dict() -> None:
     assert d["sent"] is True
     assert d["command"] == ["notify-send", "test"]
     assert d["returncode"] == 0
+
+
+def test_cli_notify_default_success() -> None:
+    """Verify uniwifi notify CLI dispatches default notification."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+
+    mock_res = NotificationResult(
+        sent=True,
+        command=["notify-send", "-a", "UniWiFi", "Test Title", "Test Body"],
+        returncode=0,
+    )
+    with patch("uniwifi.notify.send", return_value=mock_res):
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["notify", "--title", "Test Title", "--body", "Test Body"]
+        )
+        assert result.exit_code == 0
+        assert "Notification dispatched successfully!" in result.stdout
+        assert "notify-send" in result.stdout
+
+
+def test_cli_notify_kinds() -> None:
+    """Verify uniwifi notify --kind routes to appropriate dispatchers."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+
+    mock_res = NotificationResult(sent=True, returncode=0)
+    with (
+        patch(
+            "uniwifi.notify.notify_login_success", return_value=mock_res
+        ) as mock_succ,
+        patch("uniwifi.notify.notify_login_failed", return_value=mock_res) as mock_fail,
+        patch(
+            "uniwifi.notify.notify_portal_detected", return_value=mock_res
+        ) as mock_port,
+        patch(
+            "uniwifi.notify.notify_untrusted_host", return_value=mock_res
+        ) as mock_untr,
+    ):
+        runner = CliRunner()
+
+        assert runner.invoke(app, ["notify", "--kind", "success"]).exit_code == 0
+        mock_succ.assert_called_once()
+
+        assert runner.invoke(app, ["notify", "--kind", "fail"]).exit_code == 0
+        mock_fail.assert_called_once()
+
+        assert runner.invoke(app, ["notify", "--kind", "lockout"]).exit_code == 0
+        assert mock_fail.call_count == 2
+        assert mock_fail.call_args[1].get("is_lockout") is True
+
+        assert runner.invoke(app, ["notify", "--kind", "portal"]).exit_code == 0
+        mock_port.assert_called_once()
+
+        assert runner.invoke(app, ["notify", "--kind", "untrusted"]).exit_code == 0
+        mock_untr.assert_called_once()
+
+
+def test_cli_notify_skipped_output() -> None:
+    """Verify uniwifi notify outputs warning when skipped."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+
+    mock_res = NotificationResult(
+        sent=False,
+        skipped_reason="Headless environment: No graphical display session detected",
+    )
+    with patch("uniwifi.notify.send", return_value=mock_res):
+        runner = CliRunner()
+        result = runner.invoke(app, ["notify"])
+        assert result.exit_code == 0
+        assert "Notification skipped" in result.stdout
+
+
+def test_cli_notify_failed_exit_code() -> None:
+    """Verify uniwifi notify exits with code 1 on command failure."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+
+    mock_res = NotificationResult(
+        sent=False,
+        error="Cannot connect to display",
+    )
+    with patch("uniwifi.notify.send", return_value=mock_res):
+        runner = CliRunner()
+        result = runner.invoke(app, ["notify"])
+        assert result.exit_code == 1
+        assert "Failed to send notification" in result.stdout
+
+
+def test_cli_notify_json_output() -> None:
+    """Verify uniwifi notify --json prints machine-readable JSON."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+
+    mock_res = NotificationResult(
+        sent=True,
+        command=["notify-send", "test"],
+        returncode=0,
+    )
+    with patch("uniwifi.notify.send", return_value=mock_res):
+        runner = CliRunner()
+        result = runner.invoke(app, ["notify", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert data["sent"] is True
+        assert data["command"] == ["notify-send", "test"]
+
+
+def test_cli_verbose_flag() -> None:
+    """Verify --verbose global flag initializes debug level logging."""
+    from typer.testing import CliRunner
+
+    from uniwifi.cli import app
+
+    with patch("uniwifi.notify.send", return_value=NotificationResult(sent=True)):
+        runner = CliRunner()
+        result = runner.invoke(app, ["--verbose", "notify"])
+        assert result.exit_code == 0
