@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum, StrEnum
 from typing import Any
 
+from dbus_fast import BusType
 from dbus_fast.aio import MessageBus
 
 log = logging.getLogger("uniwifi.events")
@@ -97,21 +98,97 @@ class Events:
         on_trigger: EventCallback | None = None,
         bus: MessageBus | None = None,
         resume_settle_delay: float = DEFAULT_RESUME_SETTLE_DELAY,
+        auto_reconnect: bool = True,
     ) -> None:
         self.on_trigger = on_trigger
         self.bus: MessageBus | None = bus
         self.resume_settle_delay = resume_settle_delay
+        self.auto_reconnect = auto_reconnect
         self.nm_obj: Any = None
         self.nm_iface: Any = None
         self.props_iface: Any = None
         self.logind_obj: Any = None
         self.logind_mgr: Any = None
         self._connected: bool = False
+        self._stop_requested: bool = False
 
     @property
     def is_connected(self) -> bool:
         """Check if listener currently holds an active D-Bus connection."""
-        return self._connected and self.bus is not None
+        return (
+            self._connected
+            and self.bus is not None
+            and getattr(self.bus, "connected", True)
+        )
+
+    async def start(self) -> Events:
+        """Connect to system D-Bus and initialize subscriptions."""
+        self._stop_requested = False
+        if self.bus is None:
+            try:
+                self.bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            except Exception as err:
+                raise DBusConnectionError(
+                    f"Could not connect to system D-Bus: {err}"
+                ) from err
+
+        await self._setup_networkmanager()
+        await self._setup_logind()
+        self._connected = True
+        log.info("D-Bus event listener started successfully")
+        return self
+
+    async def stop(self) -> None:
+        """Disconnect and release D-Bus resources."""
+        self._stop_requested = True
+        self._connected = False
+        if self.bus is not None:
+            try:
+                self.bus.disconnect()
+            except Exception as err:
+                log.debug("Error during D-Bus disconnect: %s", err)
+            self.bus = None
+
+        self.nm_obj = None
+        self.nm_iface = None
+        self.props_iface = None
+        self.logind_obj = None
+        self.logind_mgr = None
+        log.info("D-Bus event listener stopped")
+
+    async def listen_forever(self, reconnect_interval: float = 5.0) -> None:
+        """Listen indefinitely for D-Bus events with automatic reconnection."""
+        while not self._stop_requested:
+            try:
+                if not self.is_connected:
+                    await self.start()
+                if self.bus and hasattr(self.bus, "wait_for_disconnect"):
+                    await self.bus.wait_for_disconnect()
+                else:
+                    while self.is_connected and not self._stop_requested:
+                        await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                break
+            except Exception as err:
+                if self._stop_requested:
+                    break
+                log.warning("D-Bus event listener error: %s", err)
+                if not self.auto_reconnect:
+                    raise
+                log.info(
+                    "Attempting D-Bus reconnection in %.1fs...", reconnect_interval
+                )
+                await asyncio.sleep(reconnect_interval)
+            finally:
+                if not self._stop_requested and self.auto_reconnect:
+                    self._connected = False
+                    self.bus = None
+
+    async def __aenter__(self) -> Events:
+        return await self.start()
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.stop()
 
     async def _setup_networkmanager(self) -> None:
         """Introspect and bind to NetworkManager D-Bus interfaces."""
