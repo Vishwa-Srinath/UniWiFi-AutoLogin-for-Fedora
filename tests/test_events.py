@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from uniwifi.events import (
+    LOGIN1_BUS_NAME,
+    LOGIN1_MANAGER_IFACE,
+    LOGIN1_OBJECT_PATH,
     NM_BUS_NAME,
     DBusConnectionError,
     DBusEvent,
     Events,
     EventType,
     NMConnectivity,
+    inspect_system_dbus,
+    inspect_system_dbus_sync,
 )
 
 
@@ -228,3 +234,188 @@ async def test_setup_networkmanager_attaches_property_handler() -> None:
     mock_props_iface.on_properties_changed.assert_called_once()
     assert events.nm_iface is mock_nm_iface
     assert events.props_iface is mock_props_iface
+
+
+@pytest.mark.asyncio
+async def test_setup_logind_attaches_signal_handler() -> None:
+    """Verify _setup_logind introspects and attaches PrepareForSleep signal handler."""
+    mock_bus = MagicMock()
+    mock_intro = MagicMock()
+    mock_bus.introspect = AsyncMock(return_value=mock_intro)
+
+    mock_proxy = MagicMock()
+    mock_logind_mgr = MagicMock()
+    mock_proxy.get_interface.return_value = mock_logind_mgr
+    mock_bus.get_proxy_object.return_value = mock_proxy
+
+    events = Events(bus=mock_bus)
+    await events._setup_logind()
+
+    mock_bus.introspect.assert_awaited_once_with(LOGIN1_BUS_NAME, LOGIN1_OBJECT_PATH)
+    mock_proxy.get_interface.assert_called_once_with(LOGIN1_MANAGER_IFACE)
+    mock_logind_mgr.on_prepare_for_sleep.assert_called_once()
+    assert events.logind_mgr is mock_logind_mgr
+
+
+@pytest.mark.asyncio
+async def test_handle_prepare_for_sleep_starting() -> None:
+    """Verify PrepareForSleep(True) emits SLEEPING event."""
+    received: list[DBusEvent] = []
+
+    async def callback(event: DBusEvent) -> None:
+        received.append(event)
+
+    events = Events(on_trigger=callback)
+    events._handle_prepare_for_sleep(starting=True)
+
+    await asyncio.sleep(0.01)
+
+    assert len(received) == 1
+    assert received[0].event_type == EventType.SLEEPING
+    assert received[0].source == "logind"
+    assert received[0].details == {"starting": True}
+
+
+@pytest.mark.asyncio
+async def test_after_resume_forces_connectivity_check_and_emits_resume() -> None:
+    """Verify _after_resume calls check_connectivity and emits RESUME event."""
+    received: list[DBusEvent] = []
+
+    async def callback(event: DBusEvent) -> None:
+        received.append(event)
+
+    events = Events(on_trigger=callback, resume_settle_delay=0.0)
+    events.check_connectivity = AsyncMock(return_value=2)  # type: ignore[method-assign]
+
+    await events._after_resume(delay=0.0)
+
+    events.check_connectivity.assert_awaited_once()
+    assert len(received) == 1
+    assert received[0].event_type == EventType.RESUME
+    assert received[0].source == "logind"
+    assert received[0].details["delay_seconds"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_events_start_and_stop_lifecycle() -> None:
+    """Verify start and stop methods establish and tear down listener resources."""
+    mock_bus = MagicMock()
+    mock_bus.connected = True
+    mock_bus.disconnect = MagicMock()
+
+    events = Events(bus=mock_bus)
+    events._setup_networkmanager = AsyncMock()  # type: ignore[method-assign]
+    events._setup_logind = AsyncMock()  # type: ignore[method-assign]
+
+    assert not events.is_connected
+    await events.start()
+    assert events.is_connected
+    events._setup_networkmanager.assert_awaited_once()
+    events._setup_logind.assert_awaited_once()
+
+    await events.stop()
+    assert not events.is_connected
+    mock_bus.disconnect.assert_called_once()
+    assert events.bus is None
+
+
+@pytest.mark.asyncio
+async def test_events_async_context_manager() -> None:
+    """Verify async context manager protocol enters start() and exits stop()."""
+    mock_bus = MagicMock()
+    mock_bus.connected = True
+
+    events = Events(bus=mock_bus)
+    events._setup_networkmanager = AsyncMock()  # type: ignore[method-assign]
+    events._setup_logind = AsyncMock()  # type: ignore[method-assign]
+
+    async with events as ev:
+        assert ev.is_connected
+
+    assert not events.is_connected
+
+
+@pytest.mark.asyncio
+async def test_dispatch_event_handles_callback_exceptions() -> None:
+    """Verify dispatch_event catches and logs exceptions without crashing."""
+    bad_callback = MagicMock(side_effect=RuntimeError("callback crash"))
+    events = Events(on_trigger=bad_callback)
+
+    event = DBusEvent(event_type=EventType.RESUME, source="logind")
+    # Should not raise exception
+    await events.dispatch_event(event)
+    bad_callback.assert_called_once_with(event)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_event_supports_str_arg_callback() -> None:
+    """Verify dispatch_event falls back to string event name for legacy callbacks."""
+    received_str: list[str] = []
+
+    def str_callback(event_name: str) -> None:
+        received_str.append(event_name)
+
+    # Wrap in lambda that rejects DBusEvent object by type signature
+    def strict_str_callback(arg: Any) -> None:
+        if isinstance(arg, DBusEvent):
+            raise TypeError("Expected str, got DBusEvent")
+        str_callback(arg)
+
+    events = Events(on_trigger=strict_str_callback)
+    event = DBusEvent(event_type=EventType.PORTAL_DETECTED, source="NetworkManager")
+    await events.dispatch_event(event)
+
+    assert received_str == ["portal-detected"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_system_dbus_with_mock_bus() -> None:
+    """Verify inspect_system_dbus reports healthy NetworkManager and logind."""
+    mock_bus = MagicMock()
+    mock_bus.introspect = AsyncMock(return_value="<node/>")
+
+    mock_proxy = MagicMock()
+    mock_props = MagicMock()
+    mock_props.call_get = AsyncMock(return_value=4)
+    mock_proxy.get_interface.return_value = mock_props
+    mock_bus.get_proxy_object.return_value = mock_proxy
+
+    report = await inspect_system_dbus(bus=mock_bus)
+
+    assert report["dbus_connected"] is True
+    assert report["networkmanager"]["available"] is True
+    assert report["networkmanager"]["connectivity"] == 4
+    assert report["networkmanager"]["connectivity_state"] == "FULL"
+    assert report["logind"]["available"] is True
+    assert report["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_inspect_system_dbus_connection_failure() -> None:
+    """Verify inspect_system_dbus reports gracefully when D-Bus cannot connect."""
+    with patch(
+        "uniwifi.events.MessageBus",
+        side_effect=RuntimeError("D-Bus socket missing"),
+    ):
+        report = await inspect_system_dbus(bus=None)
+
+    assert report["dbus_connected"] is False
+    assert "D-Bus socket missing" in (report["error"] or "")
+
+
+def test_inspect_system_dbus_sync_wrapper() -> None:
+    """Verify inspect_system_dbus_sync synchronously returns diagnostics."""
+    mock_bus = MagicMock()
+    mock_bus.introspect = AsyncMock(return_value="<node/>")
+
+    mock_proxy = MagicMock()
+    mock_props = MagicMock()
+    mock_props.call_get = AsyncMock(return_value=2)
+    mock_proxy.get_interface.return_value = mock_props
+    mock_bus.get_proxy_object.return_value = mock_proxy
+
+    report = inspect_system_dbus_sync(bus=mock_bus)
+
+    assert report["dbus_connected"] is True
+    assert report["networkmanager"]["connectivity"] == 2
+    assert report["networkmanager"]["connectivity_state"] == "PORTAL"
