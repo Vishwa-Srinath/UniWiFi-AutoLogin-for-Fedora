@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -229,3 +230,73 @@ def get_current_wifi_ssid() -> str | None:
     if active:
         return active[0].name
     return None
+
+
+UNRECOVERABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
+    DaemonSSIDError,
+    DaemonCredentialMissingError,
+)
+
+
+def is_unrecoverable_error(exc: Exception | None) -> bool:
+    """Determine if an exception represents a fatal error where retrying is harmful."""
+    if exc is None:
+        return False
+
+    from .detector import UntrustedHostError
+    from .login import AccountLockedError, InvalidCredentialsError
+
+    unrecoverable = (
+        *UNRECOVERABLE_EXCEPTIONS,
+        InvalidCredentialsError,
+        AccountLockedError,
+        UntrustedHostError,
+    )
+    return isinstance(exc, unrecoverable)
+
+
+def calculate_backoff_delay(
+    attempt: int,
+    base_delay: float = 5.0,
+    factor: float = 3.0,
+    max_delay: float = 60.0,
+    jitter: float = 0.0,
+) -> float:
+    """Calculate exponential backoff duration for a given retry attempt index (1-based).
+
+    Formula: min(max_delay, base_delay * (factor ** (attempt - 1))) + uniform(0, jitter)
+    """
+    if attempt < 1:
+        attempt = 1
+    delay = base_delay * (factor ** (attempt - 1))
+    capped = min(max_delay, max(0.0, delay))
+    if jitter > 0:
+        capped += random.uniform(0.0, jitter)
+    return round(capped, 3)
+
+
+@dataclass
+class RetryPolicy:
+    """Configuration and decision logic for exponential backoff retries."""
+
+    max_attempts: int = 3
+    base_delay: float = 5.0
+    factor: float = 3.0
+    max_delay: float = 60.0
+    jitter: float = 0.0
+
+    def get_delay(self, attempt: int) -> float:
+        """Compute delay in seconds for the upcoming retry attempt."""
+        return calculate_backoff_delay(
+            attempt=attempt,
+            base_delay=self.base_delay,
+            factor=self.factor,
+            max_delay=self.max_delay,
+            jitter=self.jitter,
+        )
+
+    def should_retry(self, attempt: int, exc: Exception | None = None) -> bool:
+        """Evaluate if another retry attempt is warranted."""
+        if attempt >= self.max_attempts:
+            return False
+        return not (exc is not None and is_unrecoverable_error(exc))

@@ -19,10 +19,15 @@ from uniwifi.daemon import (
     DaemonStatus,
     DaemonTrigger,
     EventDebouncer,
+    RetryPolicy,
+    calculate_backoff_delay,
     get_current_wifi_ssid,
     is_ssid_allowed,
+    is_unrecoverable_error,
     validate_active_ssid,
 )
+from uniwifi.detector import UntrustedHostError
+from uniwifi.login import AccountLockedError, InvalidCredentialsError
 
 
 def test_daemon_state_and_trigger_enums() -> None:
@@ -245,3 +250,90 @@ def test_get_current_wifi_ssid_none() -> None:
     """Verify get_current_wifi_ssid returns None when no active Wi-Fi."""
     with patch("uniwifi.recon.get_active_wifi_connections", return_value=[]):
         assert get_current_wifi_ssid() is None
+
+
+def test_calculate_backoff_delay_exponential_growth() -> None:
+    """Verify backoff increases exponentially: 5s, 15s, 45s."""
+    assert calculate_backoff_delay(1, base_delay=5.0, factor=3.0, jitter=0.0) == 5.0
+    assert calculate_backoff_delay(2, base_delay=5.0, factor=3.0, jitter=0.0) == 15.0
+    assert calculate_backoff_delay(3, base_delay=5.0, factor=3.0, jitter=0.0) == 45.0
+
+
+def test_calculate_backoff_delay_max_cap() -> None:
+    """Verify backoff never exceeds configured max_delay."""
+    assert (
+        calculate_backoff_delay(
+            4, base_delay=5.0, factor=3.0, max_delay=60.0, jitter=0.0
+        )
+        == 60.0
+    )
+    assert (
+        calculate_backoff_delay(
+            10, base_delay=5.0, factor=3.0, max_delay=60.0, jitter=0.0
+        )
+        == 60.0
+    )
+
+
+def test_calculate_backoff_delay_jitter_range() -> None:
+    """Verify jitter adds positive value within [0, jitter]."""
+    for _ in range(20):
+        val = calculate_backoff_delay(1, base_delay=5.0, jitter=2.0)
+        assert 5.0 <= val <= 7.0
+
+
+def test_calculate_backoff_delay_zero_or_negative_attempt() -> None:
+    """Verify non-positive attempt index defaults safely to 1."""
+    assert calculate_backoff_delay(0, base_delay=5.0, jitter=0.0) == 5.0
+    assert calculate_backoff_delay(-2, base_delay=5.0, jitter=0.0) == 5.0
+
+
+def test_retry_policy_delays_and_defaults() -> None:
+    """Verify RetryPolicy default attributes and delay computation."""
+    policy = RetryPolicy(max_attempts=3, base_delay=5.0, factor=3.0, jitter=0.0)
+    assert policy.get_delay(1) == 5.0
+    assert policy.get_delay(2) == 15.0
+    assert policy.get_delay(3) == 45.0
+
+
+def test_retry_policy_should_retry_attempts() -> None:
+    """Verify should_retry respects max_attempts bound."""
+    policy = RetryPolicy(max_attempts=3)
+    assert policy.should_retry(1)
+    assert policy.should_retry(2)
+    assert not policy.should_retry(3)
+    assert not policy.should_retry(4)
+
+
+def test_retry_policy_unrecoverable_errors() -> None:
+    """Verify fatal authentication and security errors immediately abort retries."""
+    policy = RetryPolicy(max_attempts=5)
+
+    # Recoverable transient network error
+    assert policy.should_retry(1, exc=RuntimeError("connection dropped"))
+
+    # Unrecoverable errors
+    assert not policy.should_retry(
+        1, exc=InvalidCredentialsError("Invalid username or password")
+    )
+    assert not policy.should_retry(
+        1, exc=AccountLockedError("Account locked out by portal")
+    )
+    assert not policy.should_retry(1, exc=UntrustedHostError("Untrusted portal host"))
+    assert not policy.should_retry(
+        1, exc=DaemonSSIDMismatchError("Other-SSID", ["Campus-WiFi"])
+    )
+    assert not policy.should_retry(
+        1, exc=DaemonCredentialMissingError("No keyring credentials")
+    )
+
+
+def test_is_unrecoverable_error_helper() -> None:
+    """Verify is_unrecoverable_error classification helper."""
+    assert not is_unrecoverable_error(None)
+    assert not is_unrecoverable_error(OSError("network unreachable"))
+    assert is_unrecoverable_error(InvalidCredentialsError("bad pw"))
+    assert is_unrecoverable_error(AccountLockedError("locked"))
+    assert is_unrecoverable_error(UntrustedHostError("spoofed"))
+    assert is_unrecoverable_error(DaemonSSIDMismatchError("bad", ["good"]))
+    assert is_unrecoverable_error(DaemonCredentialMissingError("none"))
