@@ -26,7 +26,16 @@ def test_cli_help_flag() -> None:
     """Verify --help includes all expected subcommands."""
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ["setup", "status", "login", "run", "recon", "config", "notify"]:
+    for cmd in [
+        "setup",
+        "status",
+        "login",
+        "run",
+        "recon",
+        "config",
+        "notify",
+        "events",
+    ]:
         assert cmd in result.stdout
 
 
