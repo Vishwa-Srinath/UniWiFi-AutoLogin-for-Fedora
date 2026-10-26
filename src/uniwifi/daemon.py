@@ -15,6 +15,16 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from .config import Config
+from .config import load as load_config
+from .credentials import CredentialsNotFoundError
+from .credentials import load as load_credentials
+from .login import LoginResult, login_and_verify_async
+from .notify import (
+    notify_login_failed,
+    notify_login_success,
+)
+
 log = logging.getLogger("uniwifi.daemon")
 
 
@@ -300,3 +310,135 @@ class RetryPolicy:
         if attempt >= self.max_attempts:
             return False
         return not (exc is not None and is_unrecoverable_error(exc))
+
+
+class Daemon:
+    """UniWiFi AutoLogin background orchestrator service.
+
+    Coordinates D-Bus system events, debounces bursts, checks SSID authorization,
+    loads system keyring credentials, automates captive portal login, and
+    performs post-authentication connectivity verification.
+    """
+
+    def __init__(
+        self,
+        config: Config | None = None,
+        retry_policy: RetryPolicy | None = None,
+        resume_settle_delay: float = 3.0,
+    ) -> None:
+        self.config: Config = config if config is not None else load_config()
+        self.retry_policy: RetryPolicy = (
+            retry_policy
+            if retry_policy is not None
+            else RetryPolicy(
+                max_attempts=self.config.general.max_attempts,
+                base_delay=float(self.config.general.backoff_base_seconds),
+            )
+        )
+        self.resume_settle_delay = resume_settle_delay
+        self.status = DaemonStatus(state=DaemonState.STOPPED)
+        self._lock = asyncio.Lock()
+
+    @property
+    def state(self) -> DaemonState:
+        """Current operational state of the daemon."""
+        return self.status.state
+
+    def _set_state(self, new_state: DaemonState) -> None:
+        """Update internal state and log transition."""
+        old_state = self.status.state
+        if old_state != new_state:
+            log.info("Daemon state: %s -> %s", old_state.value, new_state.value)
+            self.status.state = new_state
+
+    async def trigger_login(
+        self,
+        trigger: DaemonTrigger | str = DaemonTrigger.MANUAL,
+        portal_url: str | None = None,
+        html: str | None = None,
+        client: Any = None,
+    ) -> LoginResult:
+        """Execute a single-flight login and verification cycle.
+
+        Guarantees that only one authentication cycle executes at any given time.
+        Raises DaemonLockContentionError if another cycle is already running.
+        """
+        trigger_name = (
+            trigger.value if isinstance(trigger, DaemonTrigger) else str(trigger)
+        )
+        if self._lock.locked():
+            log.info(
+                "Authentication cycle already in flight, skipping trigger (%s)",
+                trigger_name,
+            )
+            raise DaemonLockContentionError(
+                f"Single-flight authentication already in progress ({trigger_name})"
+            )
+
+        async with self._lock:
+            self.status.is_locked = True
+            self.status.last_trigger = trigger_name
+
+            try:
+                # 1. SSID Validation
+                self._set_state(DaemonState.CHECKING_SSID)
+                current_ssid = get_current_wifi_ssid()
+                self.status.current_ssid = current_ssid
+
+                if not is_ssid_allowed(current_ssid, self.config.general.ssids):
+                    log.info(
+                        "Active SSID '%s' not authorized by allowlist %s",
+                        current_ssid,
+                        self.config.general.ssids,
+                    )
+                    self._set_state(DaemonState.IDLE)
+                    raise DaemonSSIDMismatchError(
+                        current_ssid or "", self.config.general.ssids
+                    )
+
+                # 2. Retrieve Credentials
+                self._set_state(DaemonState.PROBING)
+                try:
+                    username, password = load_credentials()
+                except CredentialsNotFoundError as err:
+                    self._set_state(DaemonState.IDLE)
+                    if self.config.general.notify:
+                        notify_login_failed(
+                            reason="No credentials saved in system keyring",
+                            ssid=current_ssid,
+                        )
+                    raise DaemonCredentialMissingError(
+                        "No credentials stored in keyring for uniwifi"
+                    ) from err
+
+                # 3. Submit Login and Post-Verify Connectivity
+                self._set_state(DaemonState.LOGGING_IN)
+                res = await login_and_verify_async(
+                    config=self.config,
+                    username=username,
+                    password=password,
+                    portal_url=portal_url,
+                    html=html,
+                    client=client,
+                )
+
+                # 4. Success State Transition and Notification
+                self._set_state(DaemonState.ONLINE)
+                self.status.successful_logins += 1
+                self.status.last_attempt_time = time.time()
+
+                if self.config.general.notify and not res.extra.get("already_online"):
+                    notify_login_success(
+                        ssid=current_ssid,
+                        latency_ms=res.latency_ms,
+                    )
+
+                return res
+
+            except Exception:
+                self.status.failed_logins += 1
+                if self.status.state != DaemonState.ONLINE:
+                    self._set_state(DaemonState.IDLE)
+                raise
+            finally:
+                self.status.is_locked = False

@@ -8,7 +8,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from uniwifi.config import Config, General
+from uniwifi.credentials import CredentialsNotFoundError
 from uniwifi.daemon import (
+    Daemon,
     DaemonCredentialMissingError,
     DaemonError,
     DaemonLockContentionError,
@@ -27,7 +30,11 @@ from uniwifi.daemon import (
     validate_active_ssid,
 )
 from uniwifi.detector import UntrustedHostError
-from uniwifi.login import AccountLockedError, InvalidCredentialsError
+from uniwifi.login import (
+    AccountLockedError,
+    InvalidCredentialsError,
+    LoginResult,
+)
 
 
 def test_daemon_state_and_trigger_enums() -> None:
@@ -337,3 +344,126 @@ def test_is_unrecoverable_error_helper() -> None:
     assert is_unrecoverable_error(UntrustedHostError("spoofed"))
     assert is_unrecoverable_error(DaemonSSIDMismatchError("bad", ["good"]))
     assert is_unrecoverable_error(DaemonCredentialMissingError("none"))
+
+
+def test_daemon_init_defaults() -> None:
+    """Verify Daemon initialization defaults."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"]))
+    daemon = Daemon(config=cfg)
+    assert daemon.state == DaemonState.STOPPED
+    assert daemon.config.general.ssids == ["Campus-WiFi"]
+    assert daemon.status.successful_logins == 0
+
+
+@pytest.mark.asyncio
+async def test_daemon_trigger_login_success() -> None:
+    """Verify successful login cycle transitions state to ONLINE and dispatches notification."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"], notify=True))
+    daemon = Daemon(config=cfg)
+
+    mock_result = LoginResult(
+        success=True,
+        status_code=200,
+        landing_url="https://portal.uni.edu/success",
+        latency_ms=125.0,
+    )
+
+    with (
+        patch("uniwifi.daemon.get_current_wifi_ssid", return_value="Campus-WiFi"),
+        patch("uniwifi.daemon.load_credentials", return_value=("user1", "pass1")),
+        patch(
+            "uniwifi.daemon.login_and_verify_async", return_value=mock_result
+        ) as mock_login,
+        patch("uniwifi.daemon.notify_login_success") as mock_notify,
+    ):
+        res = await daemon.trigger_login(trigger=DaemonTrigger.DBUS_EVENT)
+
+    assert res.success
+    assert daemon.state == DaemonState.ONLINE
+    assert daemon.status.successful_logins == 1
+    assert daemon.status.last_trigger == "dbus-event"
+    mock_login.assert_awaited_once()
+    mock_notify.assert_called_once_with(ssid="Campus-WiFi", latency_ms=125.0)
+
+
+@pytest.mark.asyncio
+async def test_daemon_trigger_login_ssid_mismatch() -> None:
+    """Verify trigger_login aborts cleanly when active SSID does not match allowlist."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"]))
+    daemon = Daemon(config=cfg)
+
+    with (
+        patch("uniwifi.daemon.get_current_wifi_ssid", return_value="Home-WiFi"),
+        pytest.raises(DaemonSSIDMismatchError),
+    ):
+        await daemon.trigger_login(trigger=DaemonTrigger.MANUAL)
+
+    assert daemon.state == DaemonState.IDLE
+    assert daemon.status.failed_logins == 1
+
+
+@pytest.mark.asyncio
+async def test_daemon_trigger_login_missing_credentials() -> None:
+    """Verify trigger_login raises DaemonCredentialMissingError and notifies user."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"], notify=True))
+    daemon = Daemon(config=cfg)
+
+    with (
+        patch("uniwifi.daemon.get_current_wifi_ssid", return_value="Campus-WiFi"),
+        patch(
+            "uniwifi.daemon.load_credentials",
+            side_effect=CredentialsNotFoundError("no creds"),
+        ),
+        patch("uniwifi.daemon.notify_login_failed") as mock_notify,
+        pytest.raises(DaemonCredentialMissingError),
+    ):
+        await daemon.trigger_login(trigger=DaemonTrigger.STARTUP)
+
+    assert daemon.state == DaemonState.IDLE
+    assert daemon.status.failed_logins == 1
+    mock_notify.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_daemon_trigger_login_single_flight_lock() -> None:
+    """Verify single-flight execution prevents concurrent triggers."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"]))
+    daemon = Daemon(config=cfg)
+
+    # Manually acquire the daemon lock to simulate an in-flight operation
+    await daemon._lock.acquire()
+
+    try:
+        with pytest.raises(
+            DaemonLockContentionError,
+            match="Single-flight authentication already in progress",
+        ):
+            await daemon.trigger_login(trigger=DaemonTrigger.DBUS_EVENT)
+    finally:
+        daemon._lock.release()
+
+
+@pytest.mark.asyncio
+async def test_daemon_trigger_login_already_online() -> None:
+    """Verify no redundant login notification when already verified online."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"], notify=True))
+    daemon = Daemon(config=cfg)
+
+    mock_result = LoginResult(
+        success=True,
+        status_code=200,
+        landing_url="http://fedoraproject.org",
+        extra={"already_online": True},
+    )
+
+    with (
+        patch("uniwifi.daemon.get_current_wifi_ssid", return_value="Campus-WiFi"),
+        patch("uniwifi.daemon.load_credentials", return_value=("u", "p")),
+        patch("uniwifi.daemon.login_and_verify_async", return_value=mock_result),
+        patch("uniwifi.daemon.notify_login_success") as mock_notify,
+    ):
+        res = await daemon.trigger_login(trigger=DaemonTrigger.MANUAL)
+
+    assert res.success
+    assert daemon.state == DaemonState.ONLINE
+    mock_notify.assert_not_called()
