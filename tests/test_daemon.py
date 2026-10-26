@@ -8,7 +8,9 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from typer.testing import CliRunner
 
+from uniwifi.cli import app
 from uniwifi.config import Config, General
 from uniwifi.credentials import CredentialsNotFoundError
 from uniwifi.daemon import (
@@ -778,3 +780,72 @@ async def test_daemon_run_lifecycle_and_shutdown() -> None:
         mock_attempt.assert_called_once_with(trigger=DaemonTrigger.STARTUP)
         mock_remove_sig.assert_called_once()
         mock_stop.assert_called_once()
+
+
+runner = CliRunner()
+
+
+def test_cli_run_once_success() -> None:
+    """Verify uniwifi run --once succeeds with exit code 0 on login success."""
+    mock_result = LoginResult(
+        success=True, status_code=200, landing_url="https://portal.uni.edu"
+    )
+    with patch(
+        "uniwifi.daemon.Daemon.attempt_login_with_retry",
+        return_value=mock_result,
+    ):
+        result = runner.invoke(app, ["run", "--once"])
+
+    assert result.exit_code == 0
+    assert "Authenticated successfully" in result.stdout
+
+
+def test_cli_run_once_ssid_mismatch() -> None:
+    """Verify uniwifi run --once exits 0 with informational message when SSID does not match."""
+    with patch(
+        "uniwifi.daemon.Daemon.attempt_login_with_retry",
+        side_effect=DaemonSSIDMismatchError("HomeWiFi", ["Campus-WiFi"]),
+    ):
+        result = runner.invoke(app, ["run", "--once"])
+
+    assert result.exit_code == 0
+    assert "SSID mismatch" in result.stdout
+
+
+def test_cli_run_once_missing_credentials() -> None:
+    """Verify uniwifi run --once exits 2 when credentials are not in keyring."""
+    with patch(
+        "uniwifi.daemon.Daemon.attempt_login_with_retry",
+        side_effect=DaemonCredentialMissingError("Keyring empty"),
+    ):
+        result = runner.invoke(app, ["run", "--once"])
+
+    assert result.exit_code == 2
+    assert "Keyring error" in result.stdout
+
+
+def test_cli_run_once_max_retries() -> None:
+    """Verify uniwifi run --once exits 1 when retry attempts are exhausted."""
+    with patch(
+        "uniwifi.daemon.Daemon.attempt_login_with_retry",
+        side_effect=DaemonMaxRetriesError(3, "Connection timeout"),
+    ):
+        result = runner.invoke(app, ["run", "--once"])
+
+    assert result.exit_code == 1
+    assert "Max retries exceeded" in result.stdout
+
+
+def test_cli_run_daemon_mode_invokes_run() -> None:
+    """Verify uniwifi run launches daemon run loop with expected options."""
+    with patch("uniwifi.daemon.Daemon.run", return_value=None) as mock_daemon_run:
+        result = runner.invoke(app, ["run", "--no-dbus", "--interval", "30"])
+
+    assert result.exit_code == 0
+    assert "Starting UniWiFi daemon service" in result.stdout
+    assert "UniWiFi daemon stopped." in result.stdout
+    mock_daemon_run.assert_called_once_with(
+        check_on_start=True,
+        listen_dbus=False,
+        periodic_interval=30.0,
+    )

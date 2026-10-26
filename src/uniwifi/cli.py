@@ -639,9 +639,92 @@ def login(
 
 
 @app.command()
-def run() -> None:
-    """Run the background daemon (invoked by systemd user unit)."""
-    typer.echo("Daemon loop will be implemented in Day 8.")
+def run(
+    once: bool = typer.Option(
+        False,
+        "--once",
+        "-1",
+        help="Execute a single check/login attempt cycle and exit immediately.",
+    ),
+    no_dbus: bool = typer.Option(
+        False,
+        "--no-dbus",
+        help="Disable system D-Bus listeners (e.g. for testing or polling-only).",
+    ),
+    interval: float | None = typer.Option(
+        None,
+        "--interval",
+        "-i",
+        help="Optional periodic connectivity evaluation interval in seconds.",
+    ),
+    debounce: float = typer.Option(
+        1.0,
+        "--debounce",
+        help="Burst debounce window in seconds.",
+    ),
+) -> None:
+    """Run the background daemon orchestrator (invoked by systemd user unit)."""
+    import asyncio
+
+    from .daemon import (
+        Daemon,
+        DaemonCredentialMissingError,
+        DaemonMaxRetriesError,
+        DaemonSSIDMismatchError,
+        DaemonTrigger,
+    )
+
+    daemon = Daemon(debounce_seconds=debounce)
+
+    if once:
+        typer.echo("Running single authentication evaluation cycle...")
+        try:
+            res = asyncio.run(
+                daemon.attempt_login_with_retry(trigger=DaemonTrigger.MANUAL)
+            )
+            if res.success:
+                typer.secho(
+                    "✓ Authenticated successfully or already online.",
+                    fg=typer.colors.GREEN,
+                )
+                raise typer.Exit(0)
+            else:
+                typer.secho(
+                    f"✗ Authentication unsuccessful: {res.message}",
+                    fg=typer.colors.RED,
+                )
+                raise typer.Exit(1)
+        except DaemonSSIDMismatchError as err:
+            typer.secho(f"ℹ SSID mismatch: {err}", fg=typer.colors.YELLOW)
+            raise typer.Exit(0) from None
+        except DaemonCredentialMissingError as err:
+            typer.secho(f"✗ Keyring error: {err}", fg=typer.colors.RED)
+            raise typer.Exit(2) from None
+        except DaemonMaxRetriesError as err:
+            typer.secho(f"✗ Max retries exceeded: {err}", fg=typer.colors.RED)
+            raise typer.Exit(1) from None
+        except typer.Exit:
+            raise
+        except Exception as err:
+            typer.secho(f"✗ Execution error: {err}", fg=typer.colors.RED)
+            raise typer.Exit(1) from err
+
+    typer.echo("Starting UniWiFi daemon service (press Ctrl+C to stop)...")
+    try:
+        asyncio.run(
+            daemon.run(
+                check_on_start=True,
+                listen_dbus=not no_dbus,
+                periodic_interval=interval,
+            )
+        )
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    except Exception as err:
+        typer.secho(f"Fatal daemon error: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from err
+    finally:
+        typer.echo("UniWiFi daemon stopped.")
 
 
 @app.command()
