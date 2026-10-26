@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import time
 from unittest.mock import MagicMock, patch
 
@@ -723,3 +724,57 @@ async def test_daemon_start_handles_dbus_failure_gracefully() -> None:
     assert daemon.is_running
     assert daemon._debouncer is not None
     await daemon.stop()
+
+
+def test_daemon_handle_signal_sets_stop_event() -> None:
+    """Verify receiving SIGINT or SIGTERM flags stop_event."""
+    daemon = Daemon()
+    assert not daemon._stop_event.is_set()
+
+    daemon._handle_signal(signal.SIGINT)
+    assert daemon._stop_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_daemon_periodic_check_loop_triggers_periodic_event() -> None:
+    """Verify periodic check loop triggers debouncer with PERIODIC trigger."""
+    daemon = Daemon()
+    mock_debouncer = MagicMock()
+    daemon._debouncer = mock_debouncer
+
+    loop_task = asyncio.create_task(daemon._periodic_check_loop(interval_seconds=0.01))
+    await asyncio.sleep(0.025)
+    daemon._stop_event.set()
+    await loop_task
+
+    assert mock_debouncer.trigger.call_count >= 1
+    mock_debouncer.trigger.assert_called_with(DaemonTrigger.PERIODIC)
+
+
+@pytest.mark.asyncio
+async def test_daemon_run_lifecycle_and_shutdown() -> None:
+    """Verify run() executes startup check, waits for stop event, and cleans up."""
+    daemon = Daemon()
+
+    async def _stop_later() -> None:
+        await asyncio.sleep(0.02)
+        daemon._stop_event.set()
+
+    with (
+        patch.object(daemon, "start", return_value=daemon) as mock_start,
+        patch.object(daemon, "stop", return_value=None) as mock_stop,
+        patch.object(
+            daemon, "attempt_login_with_retry", return_value=MagicMock()
+        ) as mock_attempt,
+        patch.object(daemon, "_install_signal_handlers") as mock_install_sig,
+        patch.object(daemon, "_remove_signal_handlers") as mock_remove_sig,
+    ):
+        stop_task = asyncio.create_task(_stop_later())
+        await daemon.run(check_on_start=True, listen_dbus=True, periodic_interval=None)
+        await stop_task
+
+        mock_start.assert_called_once_with(listen_dbus=True)
+        mock_install_sig.assert_called_once()
+        mock_attempt.assert_called_once_with(trigger=DaemonTrigger.STARTUP)
+        mock_remove_sig.assert_called_once()
+        mock_stop.assert_called_once()

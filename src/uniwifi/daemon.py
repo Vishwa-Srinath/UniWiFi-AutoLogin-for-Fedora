@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import logging
 import random
+import signal
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -647,3 +648,80 @@ class Daemon:
             )
         except Exception as err:
             log.error("Debounced trigger failed after retries: %s", err)
+
+    def _install_signal_handlers(self) -> None:
+        """Register OS signal traps for SIGINT and SIGTERM for graceful termination."""
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, self._handle_signal, sig)
+        except (NotImplementedError, RuntimeError):
+            pass
+
+    def _remove_signal_handlers(self) -> None:
+        """Remove previously installed OS signal handlers."""
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.remove_signal_handler(sig)
+        except (NotImplementedError, RuntimeError):
+            pass
+
+    def _handle_signal(self, sig: int) -> None:
+        """Signal callback initiating graceful daemon termination."""
+        sig_name = signal.Signals(sig).name if hasattr(signal, "Signals") else str(sig)
+        log.info(
+            "Caught signal %s (%d), initiating graceful shutdown...", sig_name, sig
+        )
+        self._stop_event.set()
+
+    async def _periodic_check_loop(self, interval_seconds: float) -> None:
+        """Worker periodically evaluating network connectivity at fixed intervals."""
+        log.info(
+            "Periodic health check loop started (interval=%.1fs)", interval_seconds
+        )
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(interval_seconds)
+                if self._stop_event.is_set():
+                    break
+                log.debug("Dispatching periodic network evaluation")
+                if self._debouncer is not None:
+                    self._debouncer.trigger(DaemonTrigger.PERIODIC)
+            except asyncio.CancelledError:
+                break
+            except Exception as err:
+                log.warning("Exception during periodic check loop: %s", err)
+
+    async def run(
+        self,
+        check_on_start: bool = True,
+        listen_dbus: bool = True,
+        periodic_interval: float | None = None,
+    ) -> None:
+        """Execute the daemon process indefinitely until termination signal is caught."""
+        await self.start(listen_dbus=listen_dbus)
+        self._install_signal_handlers()
+
+        periodic_task: asyncio.Task[None] | None = None
+        try:
+            if check_on_start:
+                log.info("Performing initial startup connectivity evaluation...")
+                try:
+                    await self.attempt_login_with_retry(trigger=DaemonTrigger.STARTUP)
+                except Exception as err:
+                    log.info("Initial startup check completed (%s)", err)
+
+            if periodic_interval and periodic_interval > 0:
+                periodic_task = asyncio.create_task(
+                    self._periodic_check_loop(periodic_interval)
+                )
+
+            await self._stop_event.wait()
+        finally:
+            if periodic_task and not periodic_task.done():
+                periodic_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await periodic_task
+            self._remove_signal_handlers()
+            await self.stop()
