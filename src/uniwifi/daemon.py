@@ -6,8 +6,10 @@ captive portal detection, automated login submission, and retry backoff.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -112,3 +114,70 @@ class DaemonStatus:
             "is_locked": self.is_locked,
             "details": self.details,
         }
+
+
+DebounceCallback = Callable[[Any], Awaitable[None]] | Callable[[Any], None]
+
+
+class EventDebouncer:
+    """Asynchronous debouncer that coalesces burst events into a single action.
+
+    When multiple events arrive within `window_seconds`, preceding timers
+    are reset and the callback is invoked only once after the burst settles.
+    """
+
+    def __init__(
+        self,
+        callback: DebounceCallback,
+        window_seconds: float = 1.0,
+    ) -> None:
+        self.callback = callback
+        self.window_seconds = max(0.0, window_seconds)
+        self._task: asyncio.Task[None] | None = None
+        self._last_event: Any = None
+
+    @property
+    def is_pending(self) -> bool:
+        """Check if a debounced callback invocation is pending."""
+        return self._task is not None and not self._task.done()
+
+    def trigger(self, event_data: Any = None) -> asyncio.Task[None]:
+        """Record an event and start/restart the debounce timer."""
+        self._last_event = event_data
+        if self._task and not self._task.done():
+            self._task.cancel()
+        self._task = asyncio.create_task(self._wait_and_dispatch(event_data))
+        return self._task
+
+    async def _wait_and_dispatch(self, event_data: Any) -> None:
+        """Internal worker sleeping for window_seconds before dispatching."""
+        try:
+            if self.window_seconds > 0:
+                await asyncio.sleep(self.window_seconds)
+            await self._invoke_callback(event_data)
+        except asyncio.CancelledError:
+            pass
+        except Exception as err:
+            log.exception("Debounced callback execution failed: %s", err)
+
+    async def _invoke_callback(self, event_data: Any) -> None:
+        """Invoke user callback safely."""
+        try:
+            res = self.callback(event_data)
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception as err:
+            log.exception("Error in debounced callback: %s", err)
+
+    def cancel(self) -> None:
+        """Cancel any pending debounce timer without executing callback."""
+        if self._task and not self._task.done():
+            self._task.cancel()
+        self._task = None
+
+    async def flush(self) -> None:
+        """Immediately trigger the callback if a timer was pending and cancel timer."""
+        if self.is_pending:
+            event = self._last_event
+            self.cancel()
+            await self._invoke_callback(event)
