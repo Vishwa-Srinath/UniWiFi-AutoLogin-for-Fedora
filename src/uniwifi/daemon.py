@@ -181,3 +181,51 @@ class EventDebouncer:
             event = self._last_event
             self.cancel()
             await self._invoke_callback(event)
+
+
+def is_ssid_allowed(current_ssid: str | None, allowed_ssids: list[str]) -> bool:
+    """Check if current SSID matches configured allowlist.
+
+    If allowed_ssids is empty or contains "*", any non-empty SSID is permitted.
+    """
+    if not current_ssid:
+        return False
+    if not allowed_ssids or "*" in allowed_ssids:
+        return True
+    return current_ssid in allowed_ssids
+
+
+def validate_active_ssid(
+    current_ssid: str | None,
+    allowed_ssids: list[str],
+    raise_on_mismatch: bool = False,
+) -> bool:
+    """Validate whether current Wi-Fi SSID is authorized for auto-login.
+
+    Args:
+        current_ssid: Name of active Wi-Fi connection / SSID.
+        allowed_ssids: Allowlist of permitted SSIDs from configuration.
+        raise_on_mismatch: If True, raises DaemonSSIDError or DaemonSSIDMismatchError.
+
+    Returns:
+        True if SSID is permitted, False otherwise.
+    """
+    if not current_ssid:
+        if raise_on_mismatch:
+            raise DaemonSSIDError("No active Wi-Fi connection detected")
+        return False
+
+    allowed = is_ssid_allowed(current_ssid, allowed_ssids)
+    if not allowed and raise_on_mismatch:
+        raise DaemonSSIDMismatchError(current_ssid, allowed_ssids)
+    return allowed
+
+
+def get_current_wifi_ssid() -> str | None:
+    """Inspect NetworkManager active connections and return the current Wi-Fi SSID."""
+    from .recon import get_active_wifi_connections
+
+    active = get_active_wifi_connections()
+    if active:
+        return active[0].name
+    return None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -12,11 +13,15 @@ from uniwifi.daemon import (
     DaemonError,
     DaemonLockContentionError,
     DaemonMaxRetriesError,
+    DaemonSSIDError,
     DaemonSSIDMismatchError,
     DaemonState,
     DaemonStatus,
     DaemonTrigger,
     EventDebouncer,
+    get_current_wifi_ssid,
+    is_ssid_allowed,
+    validate_active_ssid,
 )
 
 
@@ -174,3 +179,69 @@ async def test_debouncer_callback_exception_contained() -> None:
     await asyncio.sleep(0.03)
     # Debouncer handled error safely
     assert not debouncer.is_pending
+
+
+def test_is_ssid_allowed_matching() -> None:
+    """Verify is_ssid_allowed returns True when current SSID is in allowlist."""
+    assert is_ssid_allowed("Campus-WiFi", ["Campus-WiFi", "Eduroam"])
+    assert is_ssid_allowed("Eduroam", ["Campus-WiFi", "Eduroam"])
+
+
+def test_is_ssid_allowed_non_matching() -> None:
+    """Verify is_ssid_allowed returns False when current SSID is not in allowlist."""
+    assert not is_ssid_allowed("Home-Network", ["Campus-WiFi", "Eduroam"])
+    assert not is_ssid_allowed("CoffeeShop-Guest", ["Campus-WiFi"])
+
+
+def test_is_ssid_allowed_wildcard_and_empty() -> None:
+    """Verify empty allowlist or wildcard allowlist accepts any non-empty SSID."""
+    assert is_ssid_allowed("Any-WiFi", [])
+    assert is_ssid_allowed("Any-WiFi", ["*"])
+    assert is_ssid_allowed("Any-WiFi", ["Campus-WiFi", "*"])
+
+
+def test_is_ssid_allowed_none_or_empty() -> None:
+    """Verify None or empty string SSID is always rejected."""
+    assert not is_ssid_allowed(None, ["Campus-WiFi"])
+    assert not is_ssid_allowed("", ["Campus-WiFi"])
+    assert not is_ssid_allowed(None, [])
+    assert not is_ssid_allowed("", ["*"])
+
+
+def test_validate_active_ssid_success() -> None:
+    """Verify validate_active_ssid returns True without raising."""
+    assert validate_active_ssid("Campus-WiFi", ["Campus-WiFi"])
+    assert validate_active_ssid("Campus-WiFi", ["Campus-WiFi"], raise_on_mismatch=True)
+
+
+def test_validate_active_ssid_mismatch() -> None:
+    """Verify validate_active_ssid returns False or raises DaemonSSIDMismatchError."""
+    assert not validate_active_ssid(
+        "Other-SSID", ["Campus-WiFi"], raise_on_mismatch=False
+    )
+    with pytest.raises(DaemonSSIDMismatchError) as exc_info:
+        validate_active_ssid("Other-SSID", ["Campus-WiFi"], raise_on_mismatch=True)
+    assert exc_info.value.current_ssid == "Other-SSID"
+    assert exc_info.value.allowed_ssids == ["Campus-WiFi"]
+
+
+def test_validate_active_ssid_no_wifi() -> None:
+    """Verify validate_active_ssid returns False or raises DaemonSSIDError when None."""
+    assert not validate_active_ssid(None, ["Campus-WiFi"], raise_on_mismatch=False)
+    with pytest.raises(DaemonSSIDError, match="No active Wi-Fi connection detected"):
+        validate_active_ssid(None, ["Campus-WiFi"], raise_on_mismatch=True)
+
+
+def test_get_current_wifi_ssid_found() -> None:
+    """Verify get_current_wifi_ssid returns connection name from recon."""
+    mock_conn = MagicMock()
+    mock_conn.name = "University-Secure"
+
+    with patch("uniwifi.recon.get_active_wifi_connections", return_value=[mock_conn]):
+        assert get_current_wifi_ssid() == "University-Secure"
+
+
+def test_get_current_wifi_ssid_none() -> None:
+    """Verify get_current_wifi_ssid returns None when no active Wi-Fi."""
+    with patch("uniwifi.recon.get_active_wifi_connections", return_value=[]):
+        assert get_current_wifi_ssid() is None
