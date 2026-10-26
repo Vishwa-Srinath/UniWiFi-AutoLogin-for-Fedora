@@ -19,10 +19,17 @@ from .config import Config
 from .config import load as load_config
 from .credentials import CredentialsNotFoundError
 from .credentials import load as load_credentials
-from .login import LoginResult, login_and_verify_async
+from .detector import UntrustedHostError
+from .login import (
+    AccountLockedError,
+    InvalidCredentialsError,
+    LoginResult,
+    login_and_verify_async,
+)
 from .notify import (
     notify_login_failed,
     notify_login_success,
+    notify_untrusted_host,
 )
 
 log = logging.getLogger("uniwifi.daemon")
@@ -442,3 +449,96 @@ class Daemon:
                 raise
             finally:
                 self.status.is_locked = False
+
+    async def attempt_login_with_retry(
+        self,
+        trigger: DaemonTrigger | str = DaemonTrigger.MANUAL,
+        portal_url: str | None = None,
+        html: str | None = None,
+        client: Any = None,
+    ) -> LoginResult:
+        """Attempt authentication cycle with exponential backoff and lockout protection.
+
+        Retries transient failures up to `retry_policy.max_attempts`.
+        Immediately halts without retry storms on unrecoverable errors (invalid credentials,
+        account lockout, untrusted rogue portal, or SSID mismatch).
+        """
+        last_error: Exception | None = None
+        current_ssid = self.status.current_ssid or get_current_wifi_ssid()
+
+        for attempt in range(1, self.retry_policy.max_attempts + 1):
+            try:
+                log.info(
+                    "Executing authentication cycle (attempt %d/%d, trigger=%s)",
+                    attempt,
+                    self.retry_policy.max_attempts,
+                    trigger,
+                )
+                return await self.trigger_login(
+                    trigger=trigger,
+                    portal_url=portal_url,
+                    html=html,
+                    client=client,
+                )
+            except DaemonLockContentionError:
+                log.info(
+                    "Another authentication cycle is already in flight; aborting retry loop"
+                )
+                raise
+            except AccountLockedError:
+                log.critical(
+                    "ACCOUNT LOCKED: Portal reports university account is locked out!"
+                )
+                if self.config.general.notify:
+                    notify_login_failed(
+                        reason="Account locked out by network portal. Contact university IT.",
+                        ssid=current_ssid,
+                        is_lockout=True,
+                    )
+                raise
+            except InvalidCredentialsError as err:
+                log.error(
+                    "INVALID CREDENTIALS: Login credentials rejected by portal: %s",
+                    err,
+                )
+                if self.config.general.notify:
+                    notify_login_failed(
+                        reason="Invalid credentials. Update with 'uniwifi setup'",
+                        ssid=current_ssid,
+                    )
+                raise
+            except UntrustedHostError as err:
+                log.error("SECURITY ALERT: Untrusted portal host detected: %s", err)
+                if self.config.general.notify:
+                    notify_untrusted_host(host=str(err))
+                raise
+            except (DaemonSSIDError, DaemonCredentialMissingError):
+                raise
+            except Exception as err:
+                last_error = err
+                if not self.retry_policy.should_retry(attempt, exc=err):
+                    break
+
+                delay = self.retry_policy.get_delay(attempt)
+                self._set_state(DaemonState.BACKING_OFF)
+                log.warning(
+                    "Login attempt %d failed (%s). Retrying in %.1fs...",
+                    attempt,
+                    err,
+                    delay,
+                )
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+        # Retries exhausted
+        log.error(
+            "Authentication failed after %d attempts: %s",
+            self.retry_policy.max_attempts,
+            last_error,
+        )
+        if self.config.general.notify:
+            notify_login_failed(
+                reason=f"Authentication failed after {self.retry_policy.max_attempts} attempts",
+                ssid=current_ssid,
+            )
+        raise DaemonMaxRetriesError(self.retry_policy.max_attempts, str(last_error))

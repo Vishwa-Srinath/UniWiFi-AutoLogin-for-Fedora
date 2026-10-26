@@ -467,3 +467,136 @@ async def test_daemon_trigger_login_already_online() -> None:
     assert res.success
     assert daemon.state == DaemonState.ONLINE
     mock_notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_attempt_login_with_retry_succeeds_first_try() -> None:
+    """Verify attempt_login_with_retry returns immediately on first try success."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"]))
+    policy = RetryPolicy(max_attempts=3, base_delay=0.01)
+    daemon = Daemon(config=cfg, retry_policy=policy)
+
+    mock_result = LoginResult(
+        success=True, status_code=200, landing_url="https://uni.edu"
+    )
+
+    with patch.object(
+        daemon, "trigger_login", return_value=mock_result
+    ) as mock_trigger:
+        res = await daemon.attempt_login_with_retry(trigger=DaemonTrigger.MANUAL)
+
+    assert res.success
+    assert mock_trigger.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_attempt_login_with_retry_recovers_after_transient_failure() -> None:
+    """Verify transient error triggers retry and succeeds on attempt 2."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"]))
+    policy = RetryPolicy(max_attempts=3, base_delay=0.01, jitter=0.0)
+    daemon = Daemon(config=cfg, retry_policy=policy)
+
+    mock_result = LoginResult(
+        success=True, status_code=200, landing_url="https://uni.edu"
+    )
+
+    with patch.object(
+        daemon,
+        "trigger_login",
+        side_effect=[RuntimeError("Probe connection reset"), mock_result],
+    ) as mock_trigger:
+        res = await daemon.attempt_login_with_retry(trigger=DaemonTrigger.RETRY)
+
+    assert res.success
+    assert mock_trigger.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_attempt_login_with_retry_exhaustion_raises() -> None:
+    """Verify exceeding max_attempts raises DaemonMaxRetriesError."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"], notify=True))
+    policy = RetryPolicy(max_attempts=2, base_delay=0.01, jitter=0.0)
+    daemon = Daemon(config=cfg, retry_policy=policy)
+
+    with (
+        patch.object(
+            daemon, "trigger_login", side_effect=RuntimeError("timeout")
+        ) as mock_trigger,
+        patch("uniwifi.daemon.notify_login_failed") as mock_notify,
+        pytest.raises(DaemonMaxRetriesError) as exc_info,
+    ):
+        await daemon.attempt_login_with_retry(trigger=DaemonTrigger.DBUS_EVENT)
+
+    assert exc_info.value.attempts == 2
+    assert mock_trigger.await_count == 2
+    mock_notify.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_attempt_login_with_retry_aborts_immediately_on_invalid_credentials() -> (
+    None
+):
+    """Verify invalid credentials error aborts immediately without further retries."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"], notify=True))
+    policy = RetryPolicy(max_attempts=5, base_delay=0.01)
+    daemon = Daemon(config=cfg, retry_policy=policy)
+
+    with (
+        patch.object(
+            daemon,
+            "trigger_login",
+            side_effect=InvalidCredentialsError("Invalid username or password"),
+        ) as mock_trigger,
+        patch("uniwifi.daemon.notify_login_failed") as mock_notify,
+        pytest.raises(InvalidCredentialsError),
+    ):
+        await daemon.attempt_login_with_retry()
+
+    # Must NOT attempt 5 times
+    assert mock_trigger.await_count == 1
+    mock_notify.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_attempt_login_with_retry_aborts_immediately_on_account_locked() -> None:
+    """Verify account lockout aborts immediately with lockout alert notification."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"], notify=True))
+    policy = RetryPolicy(max_attempts=5, base_delay=0.01)
+    daemon = Daemon(config=cfg, retry_policy=policy)
+
+    with (
+        patch.object(
+            daemon,
+            "trigger_login",
+            side_effect=AccountLockedError("Account disabled by network"),
+        ) as mock_trigger,
+        patch("uniwifi.daemon.notify_login_failed") as mock_notify,
+        pytest.raises(AccountLockedError),
+    ):
+        await daemon.attempt_login_with_retry()
+
+    assert mock_trigger.await_count == 1
+    mock_notify.assert_called_once()
+    assert mock_notify.call_args[1].get("is_lockout") is True
+
+
+@pytest.mark.asyncio
+async def test_attempt_login_with_retry_aborts_immediately_on_untrusted_host() -> None:
+    """Verify untrusted captive portal host aborts immediately and alerts."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"], notify=True))
+    policy = RetryPolicy(max_attempts=5, base_delay=0.01)
+    daemon = Daemon(config=cfg, retry_policy=policy)
+
+    with (
+        patch.object(
+            daemon,
+            "trigger_login",
+            side_effect=UntrustedHostError("Untrusted host evil-portal.com"),
+        ) as mock_trigger,
+        patch("uniwifi.daemon.notify_untrusted_host") as mock_notify,
+        pytest.raises(UntrustedHostError),
+    ):
+        await daemon.attempt_login_with_retry()
+
+    assert mock_trigger.await_count == 1
+    mock_notify.assert_called_once_with(host="Untrusted host evil-portal.com")
