@@ -7,6 +7,7 @@ captive portal detection, automated login submission, and retry backoff.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import random
 import time
@@ -20,6 +21,7 @@ from .config import load as load_config
 from .credentials import CredentialsNotFoundError
 from .credentials import load as load_credentials
 from .detector import UntrustedHostError
+from .events import DBusEvent, Events, EventType
 from .login import (
     AccountLockedError,
     InvalidCredentialsError,
@@ -55,6 +57,7 @@ class DaemonTrigger(StrEnum):
 
     STARTUP = "startup"
     DBUS_EVENT = "dbus-event"
+    RESUME = "resume"
     MANUAL = "manual"
     PERIODIC = "periodic"
     RETRY = "retry"
@@ -200,6 +203,9 @@ class EventDebouncer:
             self.cancel()
             await self._invoke_callback(event)
 
+    # Convenient alias for record_event/trigger compatibility
+    record_event = trigger
+
 
 def is_ssid_allowed(current_ssid: str | None, allowed_ssids: list[str]) -> bool:
     """Check if current SSID matches configured allowlist.
@@ -332,6 +338,7 @@ class Daemon:
         config: Config | None = None,
         retry_policy: RetryPolicy | None = None,
         resume_settle_delay: float = 3.0,
+        debounce_seconds: float = 1.0,
     ) -> None:
         self.config: Config = config if config is not None else load_config()
         self.retry_policy: RetryPolicy = (
@@ -343,13 +350,22 @@ class Daemon:
             )
         )
         self.resume_settle_delay = resume_settle_delay
+        self.debounce_seconds = debounce_seconds
         self.status = DaemonStatus(state=DaemonState.STOPPED)
         self._lock = asyncio.Lock()
+        self._debouncer: EventDebouncer | None = None
+        self._events: Events | None = None
+        self._stop_event: asyncio.Event = asyncio.Event()
 
     @property
     def state(self) -> DaemonState:
         """Current operational state of the daemon."""
         return self.status.state
+
+    @property
+    def is_running(self) -> bool:
+        """Return True if daemon is currently running and not stopped."""
+        return self.status.state != DaemonState.STOPPED
 
     def _set_state(self, new_state: DaemonState) -> None:
         """Update internal state and log transition."""
@@ -542,3 +558,92 @@ class Daemon:
                 ssid=current_ssid,
             )
         raise DaemonMaxRetriesError(self.retry_policy.max_attempts, str(last_error))
+
+    async def start(self, listen_dbus: bool = True) -> Daemon:
+        """Start daemon components including event debouncer and D-Bus listener."""
+        self._stop_event.clear()
+        self._set_state(DaemonState.STARTING)
+
+        self._debouncer = EventDebouncer(
+            callback=self._handle_debounced_event,
+            window_seconds=self.debounce_seconds,
+        )
+
+        if listen_dbus:
+            self._events = Events(
+                on_trigger=self._on_dbus_event,
+                resume_settle_delay=self.resume_settle_delay,
+            )
+            try:
+                await self._events.start()
+                log.info("Daemon D-Bus listener attached successfully")
+            except Exception as err:
+                log.warning(
+                    "Could not connect to system D-Bus (%s). Continuing in polling mode.",
+                    err,
+                )
+
+        self._set_state(DaemonState.IDLE)
+        log.info(
+            "Daemon started (SSIDs=%s, debounce=%.1fs, max_attempts=%d)",
+            self.config.general.ssids,
+            self.debounce_seconds,
+            self.retry_policy.max_attempts,
+        )
+        return self
+
+    async def stop(self) -> None:
+        """Stop daemon, cancel pending debounced events, and disconnect D-Bus listeners."""
+        self._stop_event.set()
+        if self._debouncer is not None:
+            self._debouncer.cancel()
+            self._debouncer = None
+        if self._events is not None:
+            with contextlib.suppress(Exception):
+                await self._events.stop()
+            self._events = None
+        self._set_state(DaemonState.STOPPED)
+        log.info("Daemon stopped")
+
+    async def __aenter__(self) -> Daemon:
+        """Asynchronous context manager entry starting the daemon."""
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Asynchronous context manager exit stopping the daemon."""
+        await self.stop()
+
+    def _on_dbus_event(self, event: DBusEvent) -> None:
+        """Handle incoming D-Bus event and dispatch to burst debouncer."""
+        log.info("Received system event: %s from %s", event.event_type, event.source)
+        if event.event_type in (EventType.PORTAL_DETECTED, EventType.RESUME):
+            trigger = (
+                DaemonTrigger.RESUME
+                if event.event_type == EventType.RESUME
+                else DaemonTrigger.DBUS_EVENT
+            )
+            if self._debouncer is not None:
+                self._debouncer.record_event(payload=trigger)
+
+    async def _handle_debounced_event(
+        self, trigger: Any = DaemonTrigger.DBUS_EVENT
+    ) -> None:
+        """Process coalesced trigger after debounce window settles."""
+        log.info("Executing debounced authentication cycle (trigger: %s)", trigger)
+        try:
+            await self.attempt_login_with_retry(trigger=trigger)
+        except DaemonLockContentionError:
+            log.info(
+                "Authentication cycle contention during debounced trigger; ignoring"
+            )
+        except DaemonSSIDMismatchError as err:
+            log.info("Debounced trigger ignored: SSID not authorized (%s)", err)
+        except DaemonCredentialMissingError as err:
+            log.error("Debounced trigger failed: missing credentials (%s)", err)
+        except (InvalidCredentialsError, AccountLockedError, UntrustedHostError) as err:
+            log.error(
+                "Debounced trigger aborted due to unrecoverable condition: %s", err
+            )
+        except Exception as err:
+            log.error("Debounced trigger failed after retries: %s", err)

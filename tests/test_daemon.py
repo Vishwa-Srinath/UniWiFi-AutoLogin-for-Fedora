@@ -30,6 +30,7 @@ from uniwifi.daemon import (
     validate_active_ssid,
 )
 from uniwifi.detector import UntrustedHostError
+from uniwifi.events import DBusConnectionError, DBusEvent, EventType
 from uniwifi.login import (
     AccountLockedError,
     InvalidCredentialsError,
@@ -600,3 +601,125 @@ async def test_attempt_login_with_retry_aborts_immediately_on_untrusted_host() -
 
     assert mock_trigger.await_count == 1
     mock_notify.assert_called_once_with(host="Untrusted host evil-portal.com")
+
+
+@pytest.mark.asyncio
+async def test_daemon_start_and_stop_lifecycle() -> None:
+    """Verify daemon start initializes debouncer and events, and stop cleans them up."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"]))
+    daemon = Daemon(config=cfg)
+
+    assert daemon.state == DaemonState.STOPPED
+    assert not daemon.is_running
+
+    with (
+        patch("uniwifi.daemon.Events.start", return_value=None) as mock_events_start,
+        patch("uniwifi.daemon.Events.stop", return_value=None) as mock_events_stop,
+    ):
+        await daemon.start(listen_dbus=True)
+
+        assert daemon.state == DaemonState.IDLE
+        assert daemon.is_running
+        assert daemon._debouncer is not None
+        assert daemon._events is not None
+        mock_events_start.assert_called_once()
+
+        await daemon.stop()
+
+        assert daemon.state == DaemonState.STOPPED
+        assert not daemon.is_running
+        assert daemon._debouncer is None
+        assert daemon._events is None
+        mock_events_stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_daemon_async_context_manager() -> None:
+    """Verify daemon works as an asynchronous context manager."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"]))
+    daemon = Daemon(config=cfg)
+
+    with (
+        patch("uniwifi.daemon.Events.start", return_value=None),
+        patch("uniwifi.daemon.Events.stop", return_value=None),
+    ):
+        async with daemon as d:
+            assert d is daemon
+            assert d.is_running
+            assert d.state == DaemonState.IDLE
+
+    assert daemon.state == DaemonState.STOPPED
+    assert not daemon.is_running
+
+
+@pytest.mark.asyncio
+async def test_daemon_on_dbus_event_dispatches_to_debouncer() -> None:
+    """Verify D-Bus events for portal detected and resume queue into the debouncer."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"]))
+    daemon = Daemon(config=cfg)
+    daemon._debouncer = MagicMock()
+
+    # Portal detected -> DBUS_EVENT
+    daemon._on_dbus_event(
+        DBusEvent(event_type=EventType.PORTAL_DETECTED, source="NetworkManager")
+    )
+    daemon._debouncer.record_event.assert_called_with(payload=DaemonTrigger.DBUS_EVENT)
+
+    # Resume -> RESUME
+    daemon._on_dbus_event(
+        DBusEvent(event_type=EventType.RESUME, source="systemd-logind")
+    )
+    daemon._debouncer.record_event.assert_called_with(payload=DaemonTrigger.RESUME)
+
+    # Unrelated event (sleeping) -> ignored
+    daemon._debouncer.reset_mock()
+    daemon._on_dbus_event(
+        DBusEvent(event_type=EventType.SLEEPING, source="systemd-logind")
+    )
+    daemon._debouncer.record_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_daemon_handle_debounced_event_executes_retry_loop() -> None:
+    """Verify debounced callback triggers attempt_login_with_retry and swallows errors safely."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"]))
+    daemon = Daemon(config=cfg)
+
+    with patch.object(
+        daemon, "attempt_login_with_retry", return_value=MagicMock()
+    ) as mock_retry:
+        await daemon._handle_debounced_event(trigger=DaemonTrigger.DBUS_EVENT)
+        mock_retry.assert_called_once_with(trigger=DaemonTrigger.DBUS_EVENT)
+
+    # Errors raised inside attempt_login_with_retry must not crash _handle_debounced_event
+    with patch.object(
+        daemon,
+        "attempt_login_with_retry",
+        side_effect=DaemonMaxRetriesError(3, "network down"),
+    ):
+        await daemon._handle_debounced_event(trigger=DaemonTrigger.RESUME)
+
+    with patch.object(
+        daemon,
+        "attempt_login_with_retry",
+        side_effect=DaemonSSIDMismatchError("HomeWiFi", ["Campus-WiFi"]),
+    ):
+        await daemon._handle_debounced_event(trigger=DaemonTrigger.DBUS_EVENT)
+
+
+@pytest.mark.asyncio
+async def test_daemon_start_handles_dbus_failure_gracefully() -> None:
+    """Verify daemon continues running if D-Bus connection cannot be established."""
+    cfg = Config(general=General(ssids=["Campus-WiFi"]))
+    daemon = Daemon(config=cfg)
+
+    with patch(
+        "uniwifi.daemon.Events.start",
+        side_effect=DBusConnectionError("D-Bus socket not accessible"),
+    ):
+        await daemon.start(listen_dbus=True)
+
+    assert daemon.state == DaemonState.IDLE
+    assert daemon.is_running
+    assert daemon._debouncer is not None
+    await daemon.stop()
