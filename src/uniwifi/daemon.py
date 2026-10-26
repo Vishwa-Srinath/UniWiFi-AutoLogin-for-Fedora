@@ -141,6 +141,9 @@ class DaemonStatus:
 DebounceCallback = Callable[[Any], Awaitable[None]] | Callable[[Any], None]
 
 
+DEFAULT_BURST_WINDOW_SECONDS: float = 1.0
+
+
 class EventDebouncer:
     """Asynchronous debouncer that coalesces burst events into a single action.
 
@@ -151,7 +154,7 @@ class EventDebouncer:
     def __init__(
         self,
         callback: DebounceCallback,
-        window_seconds: float = 1.0,
+        window_seconds: float = DEFAULT_BURST_WINDOW_SECONDS,
     ) -> None:
         self.callback = callback
         self.window_seconds = max(0.0, window_seconds)
@@ -339,7 +342,7 @@ class Daemon:
         config: Config | None = None,
         retry_policy: RetryPolicy | None = None,
         resume_settle_delay: float = 3.0,
-        debounce_seconds: float = 1.0,
+        debounce_seconds: float = DEFAULT_BURST_WINDOW_SECONDS,
     ) -> None:
         self.config: Config = config if config is not None else load_config()
         self.retry_policy: RetryPolicy = (
