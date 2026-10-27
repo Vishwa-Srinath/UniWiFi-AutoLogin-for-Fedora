@@ -1,3 +1,12 @@
+# UniWiFi AutoLogin - systemd user service unit
+#
+# Runs in user session (systemd --user) so it has access to the user's
+# secret service / GNOME Keyring and desktop notification server.
+#
+# Install to: ~/.config/systemd/user/uniwifi.service
+# Enable & start: systemctl --user enable --now uniwifi.service
+# View logs: journalctl --user -u uniwifi -f
+
 [Unit]
 Description=University Wi-Fi auto-login daemon for Fedora
 Documentation=https://github.com/Vishwa-Srinath/UniWiFi-AutoLogin-for-Fedora
@@ -9,6 +18,7 @@ Type=simple
 ExecStart=%h/.local/bin/uniwifi run
 Restart=on-failure
 RestartSec=10
+SyslogIdentifier=uniwifi
 
 # Security hardening directives
 NoNewPrivileges=true

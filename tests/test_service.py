@@ -338,3 +338,32 @@ def test_get_service_logs_success_and_error() -> None:
     ):
         get_service_logs()
     assert "Failed to query journal" in str(exc_fail.value)
+
+
+def test_packaging_service_unit_file() -> None:
+    """Verify static packaging/uniwifi.service file contains required systemd directives."""
+    repo_root = Path(__file__).resolve().parent.parent
+    packaging_unit = repo_root / "packaging" / "uniwifi.service"
+
+    assert packaging_unit.is_file()
+    content = packaging_unit.read_text(encoding="utf-8")
+
+    assert "[Unit]" in content
+    assert "Description=University Wi-Fi auto-login daemon for Fedora" in content
+    assert "After=network-online.target graphical-session.target" in content
+    assert "Wants=network-online.target" in content
+
+    assert "[Service]" in content
+    assert "Type=simple" in content
+    assert "ExecStart=%h/.local/bin/uniwifi run" in content
+    assert "Restart=on-failure" in content
+    assert "RestartSec=10" in content
+    assert "SyslogIdentifier=uniwifi" in content
+
+    assert "NoNewPrivileges=true" in content
+    assert "ProtectSystem=strict" in content
+    assert "ProtectHome=read-only" in content
+    assert "PrivateTmp=true" in content
+
+    assert "[Install]" in content
+    assert "WantedBy=default.target" in content
