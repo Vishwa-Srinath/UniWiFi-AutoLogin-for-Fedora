@@ -8,11 +8,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from typer.testing import CliRunner
 
+from uniwifi.cli import app
 from uniwifi.service import (
     SERVICE_NAME,
+    ServiceError,
     ServiceExecutionError,
     ServiceNotInstalledError,
+    ServiceStatus,
     daemon_reload,
     disable_service,
     enable_service,
@@ -367,3 +371,138 @@ def test_packaging_service_unit_file() -> None:
 
     assert "[Install]" in content
     assert "WantedBy=default.target" in content
+
+
+runner = CliRunner()
+
+
+def test_cli_service_install_success() -> None:
+    """Verify uniwifi service install executes file creation, daemon-reload, and enable."""
+    with (
+        patch(
+            "uniwifi.service.install_service",
+            return_value=Path("/tmp/uniwifi.service"),
+        ) as mock_install,
+        patch("uniwifi.service.daemon_reload") as mock_reload,
+        patch("uniwifi.service.enable_service") as mock_enable,
+    ):
+        result = runner.invoke(app, ["service", "install", "--now"])
+
+    assert result.exit_code == 0
+    assert "Installed systemd user unit" in result.stdout
+    assert "Service enabled and started successfully" in result.stdout
+    mock_install.assert_called_once_with(exec_path=None, hardening=True, overwrite=True)
+    mock_reload.assert_called_once()
+    mock_enable.assert_called_once_with(now=True)
+
+
+def test_cli_service_install_error() -> None:
+    """Verify uniwifi service install handles ServiceError with exit code 1."""
+    with patch(
+        "uniwifi.service.install_service",
+        side_effect=ServiceError("Permission denied"),
+    ):
+        result = runner.invoke(app, ["service", "install"])
+
+    assert result.exit_code == 1
+    assert "Failed to install service" in result.stdout
+
+
+def test_cli_service_uninstall_success() -> None:
+    """Verify uniwifi service uninstall stops, removes unit, and reloads systemd."""
+    with (
+        patch("uniwifi.service.is_service_installed", return_value=True),
+        patch("uniwifi.service.disable_service") as mock_disable,
+        patch("uniwifi.service.uninstall_service", return_value=True) as mock_uninstall,
+        patch("uniwifi.service.daemon_reload") as mock_reload,
+    ):
+        result = runner.invoke(app, ["service", "uninstall"])
+
+    assert result.exit_code == 0
+    assert "Uninstalled uniwifi systemd user service" in result.stdout
+    mock_disable.assert_called_once_with(now=True)
+    mock_uninstall.assert_called_once()
+    mock_reload.assert_called_once()
+
+
+def test_cli_service_uninstall_not_installed() -> None:
+    """Verify uniwifi service uninstall exits 0 with info message if unit not installed."""
+    with patch("uniwifi.service.is_service_installed", return_value=False):
+        result = runner.invoke(app, ["service", "uninstall"])
+
+    assert result.exit_code == 0
+    assert "Service unit is not installed" in result.stdout
+
+
+def test_cli_service_status_text_installed() -> None:
+    """Verify uniwifi service status prints formatted active unit details."""
+    mock_status = ServiceStatus(
+        installed=True,
+        unit_path=Path("/home/user/.config/systemd/user/uniwifi.service"),
+        active_state="active",
+        sub_state="running",
+        load_state="loaded",
+        unit_file_state="enabled",
+        main_pid=4242,
+        memory_bytes=32 * 1024 * 1024,
+        active_enter_timestamp="Tue 2026-10-27 10:00:00 UTC",
+    )
+    with patch("uniwifi.service.get_service_status", return_value=mock_status):
+        result = runner.invoke(app, ["service", "status"])
+
+    assert result.exit_code == 0
+    assert "Installed:   Yes" in result.stdout
+    assert "Active:      active (running)" in result.stdout
+    assert "Main PID:    4242" in result.stdout
+    assert "Memory:      32.0 MB" in result.stdout
+
+
+def test_cli_service_status_text_not_installed() -> None:
+    """Verify uniwifi service status prints notice if unit not installed."""
+    mock_status = ServiceStatus(
+        installed=False,
+        unit_path=Path("/home/user/.config/systemd/user/uniwifi.service"),
+    )
+    with patch("uniwifi.service.get_service_status", return_value=mock_status):
+        result = runner.invoke(app, ["service", "status"])
+
+    assert result.exit_code == 0
+    assert "Installed:   No (run 'uniwifi service install')" in result.stdout
+
+
+def test_cli_service_status_json() -> None:
+    """Verify uniwifi service status --json returns parseable JSON document."""
+    import json
+
+    mock_status = ServiceStatus(
+        installed=True,
+        unit_path=Path("/home/user/.config/systemd/user/uniwifi.service"),
+        active_state="active",
+        main_pid=1001,
+    )
+    with patch("uniwifi.service.get_service_status", return_value=mock_status):
+        result = runner.invoke(app, ["service", "status", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["installed"] is True
+    assert data["main_pid"] == 1001
+
+
+def test_cli_service_cat_success_and_missing() -> None:
+    """Verify uniwifi service cat displays unit content or error message."""
+    with patch(
+        "uniwifi.service.read_service_unit",
+        return_value="[Unit]\nDescription=Test\n",
+    ):
+        result = runner.invoke(app, ["service", "cat"])
+        assert result.exit_code == 0
+        assert "Description=Test" in result.stdout
+
+    with patch(
+        "uniwifi.service.read_service_unit",
+        side_effect=ServiceNotInstalledError("Missing unit file"),
+    ):
+        result = runner.invoke(app, ["service", "cat"])
+        assert result.exit_code == 1
+        assert "Missing unit file" in result.stdout

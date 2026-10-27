@@ -35,6 +35,7 @@ def test_cli_help_flag() -> None:
         "config",
         "notify",
         "events",
+        "service",
     ]:
         assert cmd in result.stdout
 
