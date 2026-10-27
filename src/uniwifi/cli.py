@@ -1238,5 +1238,140 @@ def service_cat() -> None:
         raise typer.Exit(1) from None
 
 
+@service_app.command("start")
+def service_start() -> None:
+    """Start uniwifi.service via systemctl --user start."""
+    from .service import ServiceError, is_service_installed, start_service
+
+    if not is_service_installed():
+        typer.secho(
+            "✗ Service unit not installed. Run 'uniwifi service install'.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    try:
+        start_service()
+        typer.secho("✓ Started uniwifi systemd user service.", fg=typer.colors.GREEN)
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to start service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("stop")
+def service_stop() -> None:
+    """Stop uniwifi.service via systemctl --user stop."""
+    from .service import ServiceError, is_service_installed, stop_service
+
+    if not is_service_installed():
+        typer.secho("✗ Service unit not installed.", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    try:
+        stop_service()
+        typer.secho("✓ Stopped uniwifi systemd user service.", fg=typer.colors.GREEN)
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to stop service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("restart")
+def service_restart() -> None:
+    """Restart uniwifi.service via systemctl --user restart."""
+    from .service import ServiceError, is_service_installed, restart_service
+
+    if not is_service_installed():
+        typer.secho(
+            "✗ Service unit not installed. Run 'uniwifi service install'.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    try:
+        restart_service()
+        typer.secho("✓ Restarted uniwifi systemd user service.", fg=typer.colors.GREEN)
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to restart service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("enable")
+def service_enable_cmd(
+    now: bool = typer.Option(
+        False,
+        "--now",
+        help="Start service immediately after enabling.",
+    ),
+) -> None:
+    """Enable uniwifi.service to start on user session login."""
+    from .service import ServiceError, enable_service, is_service_installed
+
+    if not is_service_installed():
+        typer.secho(
+            "✗ Service unit not installed. Run 'uniwifi service install'.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    try:
+        enable_service(now=now)
+        action = "enabled and started" if now else "enabled"
+        typer.secho(f"✓ Service {action} successfully.", fg=typer.colors.GREEN)
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to enable service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("disable")
+def service_disable_cmd(
+    now: bool = typer.Option(
+        False,
+        "--now",
+        help="Stop service immediately after disabling.",
+    ),
+) -> None:
+    """Disable uniwifi.service from starting on user session login."""
+    from .service import ServiceError, disable_service, is_service_installed
+
+    if not is_service_installed():
+        typer.secho("✗ Service unit not installed.", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    try:
+        disable_service(now=now)
+        action = "disabled and stopped" if now else "disabled"
+        typer.secho(f"✓ Service {action} successfully.", fg=typer.colors.GREEN)
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to disable service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("logs")
+def service_logs_cmd(
+    lines: int = typer.Option(
+        50,
+        "--lines",
+        "-n",
+        help="Number of journal log lines to display.",
+    ),
+    reverse: bool = typer.Option(
+        False,
+        "--reverse",
+        "-r",
+        help="Display newest entries first.",
+    ),
+) -> None:
+    """View journald logs for uniwifi systemd user service."""
+    from .service import ServiceError, get_service_logs
+
+    try:
+        output = get_service_logs(lines=lines, reverse=reverse)
+        if output.strip():
+            typer.echo(output.rstrip())
+        else:
+            typer.secho(
+                "ℹ No journal log entries found for uniwifi.service.",
+                fg=typer.colors.YELLOW,
+            )
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to retrieve service logs: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
 if __name__ == "__main__":
     app()

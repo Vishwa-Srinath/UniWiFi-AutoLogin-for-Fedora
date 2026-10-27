@@ -506,3 +506,61 @@ def test_cli_service_cat_success_and_missing() -> None:
         result = runner.invoke(app, ["service", "cat"])
         assert result.exit_code == 1
         assert "Missing unit file" in result.stdout
+
+
+def test_cli_service_start_stop_restart_success() -> None:
+    """Verify start, stop, and restart CLI subcommands succeed when installed."""
+    with (
+        patch("uniwifi.service.is_service_installed", return_value=True),
+        patch("uniwifi.service.start_service") as mock_start,
+        patch("uniwifi.service.stop_service") as mock_stop,
+        patch("uniwifi.service.restart_service") as mock_restart,
+    ):
+        assert runner.invoke(app, ["service", "start"]).exit_code == 0
+        mock_start.assert_called_once()
+
+        assert runner.invoke(app, ["service", "stop"]).exit_code == 0
+        mock_stop.assert_called_once()
+
+        assert runner.invoke(app, ["service", "restart"]).exit_code == 0
+        mock_restart.assert_called_once()
+
+
+def test_cli_service_control_not_installed() -> None:
+    """Verify control commands fail with code 1 if unit is not installed."""
+    with patch("uniwifi.service.is_service_installed", return_value=False):
+        for cmd in ["start", "stop", "restart", "enable", "disable"]:
+            res = runner.invoke(app, ["service", cmd])
+            assert res.exit_code == 1
+            assert "Service unit not installed" in res.stdout
+
+
+def test_cli_service_enable_disable_options() -> None:
+    """Verify enable and disable support --now option."""
+    with (
+        patch("uniwifi.service.is_service_installed", return_value=True),
+        patch("uniwifi.service.enable_service") as mock_enable,
+        patch("uniwifi.service.disable_service") as mock_disable,
+    ):
+        assert runner.invoke(app, ["service", "enable", "--now"]).exit_code == 0
+        mock_enable.assert_called_once_with(now=True)
+
+        assert runner.invoke(app, ["service", "disable", "--now"]).exit_code == 0
+        mock_disable.assert_called_once_with(now=True)
+
+
+def test_cli_service_logs_display() -> None:
+    """Verify service logs displays retrieved lines or fallback notice."""
+    with patch(
+        "uniwifi.service.get_service_logs",
+        return_value="Oct 27 daemon running\n",
+    ) as mock_logs:
+        res = runner.invoke(app, ["service", "logs", "-n", "10", "--reverse"])
+        assert res.exit_code == 0
+        assert "daemon running" in res.stdout
+        mock_logs.assert_called_once_with(lines=10, reverse=True)
+
+    with patch("uniwifi.service.get_service_logs", return_value=""):
+        res = runner.invoke(app, ["service", "logs"])
+        assert res.exit_code == 0
+        assert "No journal log entries found" in res.stdout
