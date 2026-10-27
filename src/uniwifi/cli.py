@@ -345,6 +345,7 @@ def status(
         probe,
     )
     from .recon import get_active_wifi_connections
+    from .service import get_service_status
 
     check_url = DEFAULT_CHECK_URL
     check_expect = DEFAULT_CHECK_EXPECT
@@ -363,6 +364,7 @@ def status(
         check_url = probe_url
 
     active_conns = get_active_wifi_connections()
+    svc_status = get_service_status()
 
     result = probe(
         check_url=check_url,
@@ -375,6 +377,7 @@ def status(
         payload = {
             "active_wifi": [c.to_dict() for c in active_conns],
             "probe": result.to_dict(),
+            "service": svc_status.to_dict(),
         }
         typer.echo(json.dumps(payload, indent=2))
         if result.state == ConnectivityState.ONLINE:
@@ -395,6 +398,23 @@ def status(
 
     typer.echo(f"  Probe Target:   {check_url}")
     typer.echo(f"  Latency:        {result.latency_ms:.1f} ms")
+
+    if svc_status.installed:
+        svc_state_str = (
+            f"active ({svc_status.sub_state})"
+            if svc_status.is_active
+            else f"inactive ({svc_status.sub_state})"
+        )
+        color = typer.colors.GREEN if svc_status.is_active else typer.colors.YELLOW
+        typer.secho(
+            f"  Daemon Service: {svc_state_str} [enabled: {svc_status.is_enabled}]",
+            fg=color,
+        )
+    else:
+        typer.secho(
+            "  Daemon Service: not installed (run 'uniwifi service install')",
+            fg=typer.colors.YELLOW,
+        )
 
     if result.state == ConnectivityState.ONLINE:
         typer.secho("\nStatus: ONLINE", bold=True, fg=typer.colors.GREEN)
@@ -708,6 +728,17 @@ def run(
         except Exception as err:
             typer.secho(f"✗ Execution error: {err}", fg=typer.colors.RED)
             raise typer.Exit(1) from err
+
+    try:
+        from .service import is_service_active
+
+        if is_service_active():
+            typer.secho(
+                "Notice: uniwifi systemd user service is currently active in the background.",
+                fg=typer.colors.YELLOW,
+            )
+    except Exception:
+        pass
 
     typer.echo("Starting UniWiFi daemon service (press Ctrl+C to stop)...")
     try:

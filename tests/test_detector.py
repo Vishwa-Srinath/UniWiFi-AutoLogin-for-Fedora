@@ -284,6 +284,7 @@ def test_cli_status_online() -> None:
     assert result.exit_code == 0
     assert "Status: ONLINE" in result.stdout
     assert "Full internet connectivity detected" in result.stdout
+    assert "Daemon Service:" in result.stdout
 
 
 @respx.mock
@@ -341,3 +342,5 @@ def test_cli_status_json() -> None:
     data = json.loads(result.stdout)
     assert data["probe"]["state"] == "online"
     assert data["probe"]["online"] is True
+    assert "service" in data
+    assert "installed" in data["service"]

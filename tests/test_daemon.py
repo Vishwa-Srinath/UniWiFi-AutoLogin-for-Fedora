@@ -849,3 +849,15 @@ def test_cli_run_daemon_mode_invokes_run() -> None:
         listen_dbus=False,
         periodic_interval=30.0,
     )
+
+
+def test_cli_run_daemon_mode_service_active_notice() -> None:
+    """Verify uniwifi run displays a notice when systemd service is active."""
+    with (
+        patch("uniwifi.service.is_service_active", return_value=True),
+        patch("uniwifi.daemon.Daemon.run", return_value=None),
+    ):
+        result = runner.invoke(app, ["run", "--no-dbus"])
+
+    assert result.exit_code == 0
+    assert "Notice: uniwifi systemd user service is currently active" in result.stdout
