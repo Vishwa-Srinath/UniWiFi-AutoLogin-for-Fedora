@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,14 +11,26 @@ import pytest
 
 from uniwifi.service import (
     SERVICE_NAME,
+    ServiceExecutionError,
     ServiceNotInstalledError,
+    daemon_reload,
+    disable_service,
+    enable_service,
     find_uniwifi_executable,
     generate_service_unit,
     get_service_file_path,
+    get_service_logs,
+    get_service_status,
     get_user_service_dir,
     install_service,
+    is_service_active,
+    is_service_enabled,
     is_service_installed,
     read_service_unit,
+    restart_service,
+    run_systemctl,
+    start_service,
+    stop_service,
     uninstall_service,
 )
 
@@ -137,3 +150,191 @@ def test_read_service_unit_missing(tmp_path: Path) -> None:
         with pytest.raises(ServiceNotInstalledError) as exc_info:
             read_service_unit()
         assert "Service unit not installed" in str(exc_info.value)
+
+
+def test_run_systemctl_success_and_failure() -> None:
+    """Verify run_systemctl passes --user flag and handles check=True on error."""
+    mock_success = subprocess.CompletedProcess(
+        args=["systemctl", "--user", "is-active", SERVICE_NAME],
+        returncode=0,
+        stdout="active\n",
+        stderr="",
+    )
+    with patch("subprocess.run", return_value=mock_success) as mock_run:
+        res = run_systemctl(["is-active", SERVICE_NAME])
+        assert res.returncode == 0
+        assert res.stdout == "active\n"
+        mock_run.assert_called_once_with(
+            ["systemctl", "--user", "is-active", SERVICE_NAME],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    # Missing binary raises ServiceExecutionError
+    with (
+        patch("subprocess.run", side_effect=FileNotFoundError("not found")),
+        pytest.raises(ServiceExecutionError) as exc_missing,
+    ):
+        run_systemctl(["status"])
+    assert "systemctl command not found" in str(exc_missing.value)
+
+    # Command failure with check=True raises ServiceExecutionError
+    mock_failure = subprocess.CompletedProcess(
+        args=["systemctl", "--user", "start", SERVICE_NAME],
+        returncode=1,
+        stdout="",
+        stderr="Unit uniwifi.service not found.",
+    )
+    with (
+        patch("subprocess.run", return_value=mock_failure),
+        pytest.raises(ServiceExecutionError) as exc_fail,
+    ):
+        run_systemctl(["start", SERVICE_NAME], check=True)
+    assert "Unit uniwifi.service not found" in str(exc_fail.value)
+
+
+def test_service_control_commands() -> None:
+    """Verify start, stop, restart, enable, disable, and daemon_reload call systemctl."""
+    with patch("uniwifi.service.run_systemctl") as mock_run:
+        daemon_reload()
+        mock_run.assert_called_with(["daemon-reload"], check=True)
+
+        start_service()
+        mock_run.assert_called_with(["start", SERVICE_NAME], check=True)
+
+        stop_service()
+        mock_run.assert_called_with(["stop", SERVICE_NAME], check=True)
+
+        restart_service()
+        mock_run.assert_called_with(["restart", SERVICE_NAME], check=True)
+
+        enable_service(now=False)
+        mock_run.assert_called_with(["enable", SERVICE_NAME], check=True)
+
+        enable_service(now=True)
+        mock_run.assert_called_with(["enable", "--now", SERVICE_NAME], check=True)
+
+        disable_service(now=False)
+        mock_run.assert_called_with(["disable", SERVICE_NAME], check=True)
+
+        disable_service(now=True)
+        mock_run.assert_called_with(["disable", "--now", SERVICE_NAME], check=True)
+
+
+def test_is_service_active_and_enabled() -> None:
+    """Verify is_service_active and is_service_enabled return booleans based on returncode."""
+    with patch(
+        "uniwifi.service.run_systemctl",
+        return_value=subprocess.CompletedProcess([], returncode=0),
+    ):
+        assert is_service_active() is True
+        assert is_service_enabled() is True
+
+    with patch(
+        "uniwifi.service.run_systemctl",
+        return_value=subprocess.CompletedProcess([], returncode=3),
+    ):
+        assert is_service_active() is False
+        assert is_service_enabled() is False
+
+
+def test_get_service_status_not_installed(tmp_path: Path) -> None:
+    """Verify get_service_status reports uninstalled when unit file does not exist."""
+    missing_path = tmp_path / "missing.service"
+    with (
+        patch("uniwifi.service.is_service_installed", return_value=False),
+        patch("uniwifi.service.get_service_file_path", return_value=missing_path),
+    ):
+        status = get_service_status()
+        assert not status.installed
+        assert not status.is_active
+        assert not status.is_enabled
+        assert status.active_state == "inactive"
+        assert status.load_state == "not-found"
+        assert status.to_dict()["installed"] is False
+
+
+def test_get_service_status_installed_and_active(tmp_path: Path) -> None:
+    """Verify get_service_status parses systemctl show properties accurately."""
+    service_path = tmp_path / "uniwifi.service"
+    service_path.write_text("[Unit]\n")
+
+    show_output = (
+        "ActiveState=active\n"
+        "SubState=running\n"
+        "LoadState=loaded\n"
+        "UnitFileState=enabled\n"
+        "MainPID=12345\n"
+        "MemoryCurrent=45000000\n"
+        "ActiveEnterTimestamp=Tue 2026-10-27 10:00:00 UTC\n"
+    )
+
+    mock_process = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=show_output, stderr=""
+    )
+
+    with (
+        patch("uniwifi.service.is_service_installed", return_value=True),
+        patch("uniwifi.service.get_service_file_path", return_value=service_path),
+        patch("uniwifi.service.run_systemctl", return_value=mock_process),
+    ):
+        status = get_service_status()
+        assert status.installed is True
+        assert status.is_active is True
+        assert status.is_enabled is True
+        assert status.active_state == "active"
+        assert status.sub_state == "running"
+        assert status.load_state == "loaded"
+        assert status.unit_file_state == "enabled"
+        assert status.main_pid == 12345
+        assert status.memory_bytes == 45000000
+        assert status.active_enter_timestamp == "Tue 2026-10-27 10:00:00 UTC"
+        assert status.to_dict()["main_pid"] == 12345
+
+
+def test_get_service_logs_success_and_error() -> None:
+    """Verify get_service_logs formats journalctl arguments and handles errors."""
+    mock_success = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout="Oct 27 10:00:00 fedora uniwifi[123]: Started\n",
+        stderr="",
+    )
+    with patch("subprocess.run", return_value=mock_success) as mock_run:
+        logs = get_service_logs(lines=20, reverse=True)
+        assert "Started" in logs
+        mock_run.assert_called_once_with(
+            [
+                "journalctl",
+                "--user",
+                "-u",
+                SERVICE_NAME,
+                "-n",
+                "20",
+                "--no-pager",
+                "-r",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    # Missing binary raises ServiceExecutionError
+    with (
+        patch("subprocess.run", side_effect=FileNotFoundError("no journalctl")),
+        pytest.raises(ServiceExecutionError) as exc_missing,
+    ):
+        get_service_logs()
+    assert "journalctl command not found" in str(exc_missing.value)
+
+    # Error code raises ServiceExecutionError
+    mock_error = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="", stderr="Failed to query journal"
+    )
+    with (
+        patch("subprocess.run", return_value=mock_error),
+        pytest.raises(ServiceExecutionError) as exc_fail,
+    ):
+        get_service_logs()
+    assert "Failed to query journal" in str(exc_fail.value)

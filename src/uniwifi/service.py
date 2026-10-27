@@ -9,8 +9,11 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("uniwifi.service")
 
@@ -28,6 +31,48 @@ class ServiceNotInstalledError(ServiceError, FileNotFoundError):
 
 class ServiceExecutionError(ServiceError, RuntimeError):
     """Raised when systemctl or journalctl execution fails."""
+
+
+@dataclass(frozen=True)
+class ServiceStatus:
+    """Snapshot of systemd user service status."""
+
+    installed: bool
+    unit_path: Path
+    active_state: str = "inactive"
+    sub_state: str = "dead"
+    load_state: str = "not-found"
+    unit_file_state: str = "disabled"
+    main_pid: int | None = None
+    memory_bytes: int | None = None
+    active_enter_timestamp: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_active(self) -> bool:
+        """Return True if unit is in active state."""
+        return self.active_state == "active"
+
+    @property
+    def is_enabled(self) -> bool:
+        """Return True if unit is enabled to start on boot/session login."""
+        return self.unit_file_state == "enabled"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert service status snapshot to dictionary."""
+        return {
+            "installed": self.installed,
+            "unit_path": str(self.unit_path),
+            "active_state": self.active_state,
+            "sub_state": self.sub_state,
+            "load_state": self.load_state,
+            "unit_file_state": self.unit_file_state,
+            "main_pid": self.main_pid,
+            "memory_bytes": self.memory_bytes,
+            "active_enter_timestamp": self.active_enter_timestamp,
+            "is_active": self.is_active,
+            "is_enabled": self.is_enabled,
+        }
 
 
 def get_user_service_dir() -> Path:
@@ -198,3 +243,179 @@ def uninstall_service() -> bool:
         log.info("Removed systemd user service unit from %s", target_path)
         return True
     return False
+
+
+def run_systemctl(
+    args: list[str], check: bool = False
+) -> subprocess.CompletedProcess[str]:
+    """Execute systemctl --user command and return completed process.
+
+    Args:
+        args: Subcommand and flags to pass to systemctl.
+        check: If True, raises ServiceExecutionError on non-zero exit code.
+
+    Raises:
+        ServiceExecutionError: If systemctl is missing or command fails with check=True.
+    """
+    cmd = ["systemctl", "--user"] + args
+    log.debug("Executing systemd command: %s", " ".join(cmd))
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as err:
+        raise ServiceExecutionError(
+            "systemctl command not found on system PATH"
+        ) from err
+
+    if check and res.returncode != 0:
+        err_msg = res.stderr.strip() or res.stdout.strip() or f"exit {res.returncode}"
+        raise ServiceExecutionError(f"systemctl {' '.join(args)} failed: {err_msg}")
+    return res
+
+
+def daemon_reload() -> None:
+    """Reload systemd user manager configuration (systemctl --user daemon-reload)."""
+    run_systemctl(["daemon-reload"], check=True)
+    log.info("Systemd user manager reloaded")
+
+
+def is_service_active() -> bool:
+    """Check if uniwifi.service is currently active and running."""
+    res = run_systemctl(["is-active", "--quiet", SERVICE_NAME])
+    return res.returncode == 0
+
+
+def is_service_enabled() -> bool:
+    """Check if uniwifi.service is currently enabled."""
+    res = run_systemctl(["is-enabled", "--quiet", SERVICE_NAME])
+    return res.returncode == 0
+
+
+def start_service() -> None:
+    """Start uniwifi.service via systemctl --user start."""
+    run_systemctl(["start", SERVICE_NAME], check=True)
+    log.info("Started systemd user service %s", SERVICE_NAME)
+
+
+def stop_service() -> None:
+    """Stop uniwifi.service via systemctl --user stop."""
+    run_systemctl(["stop", SERVICE_NAME], check=True)
+    log.info("Stopped systemd user service %s", SERVICE_NAME)
+
+
+def restart_service() -> None:
+    """Restart uniwifi.service via systemctl --user restart."""
+    run_systemctl(["restart", SERVICE_NAME], check=True)
+    log.info("Restarted systemd user service %s", SERVICE_NAME)
+
+
+def enable_service(now: bool = False) -> None:
+    """Enable uniwifi.service to start on session login.
+
+    Args:
+        now: If True, also start service immediately (--now).
+    """
+    args = ["enable", "--now", SERVICE_NAME] if now else ["enable", SERVICE_NAME]
+    run_systemctl(args, check=True)
+    log.info("Enabled systemd user service %s (now=%s)", SERVICE_NAME, now)
+
+
+def disable_service(now: bool = False) -> None:
+    """Disable uniwifi.service from starting on session login.
+
+    Args:
+        now: If True, also stop service immediately (--now).
+    """
+    args = ["disable", "--now", SERVICE_NAME] if now else ["disable", SERVICE_NAME]
+    run_systemctl(args, check=True)
+    log.info("Disabled systemd user service %s (now=%s)", SERVICE_NAME, now)
+
+
+def get_service_status() -> ServiceStatus:
+    """Query systemd for current operational state of uniwifi.service."""
+    unit_path = get_service_file_path()
+    installed = is_service_installed()
+
+    if not installed:
+        return ServiceStatus(
+            installed=False,
+            unit_path=unit_path,
+            active_state="inactive",
+            sub_state="dead",
+            load_state="not-found",
+            unit_file_state="disabled",
+        )
+
+    res = run_systemctl(
+        [
+            "show",
+            SERVICE_NAME,
+            "--property=ActiveState,SubState,LoadState,UnitFileState,MainPID,MemoryCurrent,ActiveEnterTimestamp",
+        ]
+    )
+
+    props: dict[str, str] = {}
+    for line in res.stdout.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            props[k.strip()] = v.strip()
+
+    active_state = props.get("ActiveState", "inactive")
+    sub_state = props.get("SubState", "dead")
+    load_state = props.get("LoadState", "loaded")
+    unit_file_state = props.get("UnitFileState", "disabled")
+
+    pid_str = props.get("MainPID")
+    pid = int(pid_str) if pid_str and pid_str.isdigit() and int(pid_str) > 0 else None
+
+    mem_str = props.get("MemoryCurrent")
+    mem = int(mem_str) if mem_str and mem_str.isdigit() and int(mem_str) > 0 else None
+
+    timestamp = props.get("ActiveEnterTimestamp")
+
+    return ServiceStatus(
+        installed=True,
+        unit_path=unit_path,
+        active_state=active_state,
+        sub_state=sub_state,
+        load_state=load_state,
+        unit_file_state=unit_file_state,
+        main_pid=pid,
+        memory_bytes=mem,
+        active_enter_timestamp=(
+            timestamp if timestamp and timestamp != "[not set]" else None
+        ),
+        details=props,
+    )
+
+
+def get_service_logs(lines: int = 50, reverse: bool = False) -> str:
+    """Retrieve journald logs for uniwifi systemd user service.
+
+    Args:
+        lines: Number of most recent journal lines to retrieve.
+        reverse: If True, display most recent lines first.
+    """
+    cmd = [
+        "journalctl",
+        "--user",
+        "-u",
+        SERVICE_NAME,
+        "-n",
+        str(max(1, lines)),
+        "--no-pager",
+    ]
+    if reverse:
+        cmd.append("-r")
+
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as err:
+        raise ServiceExecutionError(
+            "journalctl command not found on system PATH"
+        ) from err
+
+    if res.returncode != 0:
+        err_msg = res.stderr.strip() or f"exit {res.returncode}"
+        raise ServiceExecutionError(f"journalctl failed: {err_msg}")
+
+    return res.stdout
