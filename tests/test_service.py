@@ -564,3 +564,40 @@ def test_cli_service_logs_display() -> None:
         res = runner.invoke(app, ["service", "logs"])
         assert res.exit_code == 0
         assert "No journal log entries found" in res.stdout
+
+
+def test_pkg_service_exports() -> None:
+    """Verify package __init__ exports all Day 9 systemd service symbols."""
+    import uniwifi
+
+    expected_symbols = [
+        "DEFAULT_SYSLOG_IDENTIFIER",
+        "SYSTEMD_SERVICE_NAME",
+        "ServiceError",
+        "ServiceExecutionError",
+        "ServiceNotInstalledError",
+        "ServiceStatus",
+        "daemon_reload",
+        "disable_service",
+        "enable_service",
+        "find_uniwifi_executable",
+        "generate_service_unit",
+        "get_service_file_path",
+        "get_service_logs",
+        "get_service_status",
+        "get_user_service_dir",
+        "install_service",
+        "is_service_active",
+        "is_service_enabled",
+        "is_service_installed",
+        "read_service_unit",
+        "restart_service",
+        "run_systemctl",
+        "start_service",
+        "stop_service",
+        "uninstall_service",
+    ]
+
+    for sym in expected_symbols:
+        assert hasattr(uniwifi, sym), f"Symbol {sym} missing from uniwifi"
+        assert sym in uniwifi.__all__, f"Symbol {sym} missing from uniwifi.__all__"
