@@ -286,6 +286,11 @@ def inspect_login_response(
             )
 
     # 2. Check invalid credentials (immediate abort to prevent lockout)
+    if status_code == 401:
+        raise InvalidCredentialsError(
+            "University captive portal returned HTTP 401 Unauthorized (invalid credentials)."
+        )
+
     for pattern in INVALID_CREDENTIAL_PATTERNS:
         if re.search(pattern, text, re.I):
             raise InvalidCredentialsError(
