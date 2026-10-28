@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import tomllib
 from dataclasses import asdict, dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,35 @@ CONFIG_DIR: Path = Path.home() / ".config" / "uniwifi"
 CONFIG_PATH: Path = CONFIG_DIR / "config.toml"
 DEFAULT_CHECK_URL: str = "http://fedoraproject.org/static/hotspot.txt"
 DEFAULT_CHECK_EXPECT: str = "OK"
+
+
+class SecuritySeverity(StrEnum):
+    """Severity classification for security audit findings."""
+
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
+@dataclass(frozen=True)
+class SecurityFinding:
+    """A detected security finding during configuration audit."""
+
+    severity: SecuritySeverity
+    category: str
+    message: str
+    remediation: str | None = None
+    auto_fixable: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert finding to dictionary representation."""
+        return {
+            "severity": str(self.severity),
+            "category": self.category,
+            "message": self.message,
+            "remediation": self.remediation,
+            "auto_fixable": self.auto_fixable,
+        }
 
 
 class ConfigError(Exception):
@@ -58,6 +89,7 @@ class Portal:
     success_contains: str = ""
     scrape_hidden_fields: bool = True
     verify_tls: bool = True
+    allow_insecure_http: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert Portal settings to dictionary."""
@@ -124,6 +156,17 @@ def validate_config(config: Config) -> list[str]:
             errors.append(
                 f"portal.login_url: Must be a valid URL starting with http:// or https:// (got '{config.portal.login_url}')."
             )
+
+    if (
+        config.portal.login_url
+        and config.portal.login_url.startswith("http://")
+        and not config.portal.allow_insecure_http
+    ):
+        errors.append(
+            f"portal.login_url: Insecure HTTP is disallowed ('{config.portal.login_url}'). "
+            "To prevent transmitting credentials in plaintext over Wi-Fi, HTTPS is enforced. "
+            "Set portal.allow_insecure_http = true in config.toml to override."
+        )
 
     return errors
 
@@ -242,6 +285,8 @@ def generate_default_toml(
         'success_contains = ""\n'
         "scrape_hidden_fields = true\n"
         "verify_tls = true\n"
+        "# Set to true to permit plain HTTP login endpoints (defaults to false for security)\n"
+        "allow_insecure_http = false\n"
     )
 
 
@@ -269,3 +314,175 @@ def init_default_config(
         secure_permissions(target)
 
     return target
+
+
+def audit_config_security(path: Path | str = CONFIG_PATH) -> list[SecurityFinding]:
+    """Perform security audit on configuration file, directory, and sensitive settings."""
+    findings: list[SecurityFinding] = []
+    cfg_file = Path(path)
+    cfg_dir = cfg_file.parent
+
+    # 1. Directory permissions check
+    if cfg_dir.exists():
+        mode = cfg_dir.stat().st_mode & 0o777
+        if mode & 0o077 != 0:
+            findings.append(
+                SecurityFinding(
+                    severity=SecuritySeverity.WARNING,
+                    category="dir_permissions",
+                    message=(
+                        f"Configuration directory {cfg_dir} has overly permissive mode "
+                        f"{oct(mode)} (expected 0700)."
+                    ),
+                    remediation=f"chmod 0700 '{cfg_dir}'",
+                    auto_fixable=True,
+                )
+            )
+
+    # 2. File existence & permissions check
+    if not cfg_file.exists():
+        findings.append(
+            SecurityFinding(
+                severity=SecuritySeverity.CRITICAL,
+                category="file_missing",
+                message=f"Configuration file does not exist at {cfg_file}.",
+                remediation="Run 'uniwifi setup' or 'uniwifi config --init' to create it.",
+                auto_fixable=False,
+            )
+        )
+        return findings
+
+    file_mode = cfg_file.stat().st_mode & 0o777
+    if file_mode & 0o077 != 0:
+        severity = (
+            SecuritySeverity.CRITICAL
+            if (file_mode & 0o004 != 0)
+            else SecuritySeverity.WARNING
+        )
+        findings.append(
+            SecurityFinding(
+                severity=severity,
+                category="file_permissions",
+                message=(
+                    f"Configuration file {cfg_file} has permissions "
+                    f"{oct(file_mode)} (should be 0600)."
+                ),
+                remediation=f"chmod 0600 '{cfg_file}'",
+                auto_fixable=True,
+            )
+        )
+
+    # 3. Plaintext password inspection
+    try:
+        content = cfg_file.read_text(encoding="utf-8")
+        if re.search(
+            r'^\s*password\s*=\s*["\'](?!["\']).+["\']', content, re.MULTILINE
+        ):
+            findings.append(
+                SecurityFinding(
+                    severity=SecuritySeverity.CRITICAL,
+                    category="plaintext_password",
+                    message=(
+                        "Plaintext password detected in config.toml! "
+                        "Credentials must NEVER be stored in the configuration file."
+                    ),
+                    remediation=(
+                        "Remove password line from config.toml and run "
+                        "'uniwifi setup' to store credentials in GNOME Keyring."
+                    ),
+                    auto_fixable=False,
+                )
+            )
+    except Exception:
+        pass
+
+    # 4. Settings inspection (allowed_hosts, allow_insecure_http, verify_tls)
+    try:
+        cfg = load(cfg_file, validate=False)
+        if not cfg.general.allowed_hosts:
+            findings.append(
+                SecurityFinding(
+                    severity=SecuritySeverity.WARNING,
+                    category="host_pinning",
+                    message=(
+                        "No allowed_hosts defined in [general]. "
+                        "Rogue APs (Evil Twins) could redirect and harvest credentials."
+                    ),
+                    remediation=(
+                        "Add trusted portal hostnames to allowed_hosts "
+                        "(e.g. allowed_hosts = ['portal.univ.edu']) in config.toml."
+                    ),
+                    auto_fixable=False,
+                )
+            )
+
+        if cfg.portal.allow_insecure_http:
+            findings.append(
+                SecurityFinding(
+                    severity=SecuritySeverity.WARNING,
+                    category="insecure_http",
+                    message=(
+                        "portal.allow_insecure_http is enabled! "
+                        "Credentials may be transmitted unencrypted over Wi-Fi."
+                    ),
+                    remediation="Set allow_insecure_http = false in config.toml unless required.",
+                    auto_fixable=False,
+                )
+            )
+
+        if not cfg.portal.verify_tls:
+            findings.append(
+                SecurityFinding(
+                    severity=SecuritySeverity.CRITICAL,
+                    category="tls_verification",
+                    message=(
+                        "portal.verify_tls is disabled! "
+                        "Vulnerable to Man-in-the-Middle (MitM) credential interception."
+                    ),
+                    remediation="Set portal.verify_tls = true in config.toml.",
+                    auto_fixable=False,
+                )
+            )
+    except Exception as err:
+        findings.append(
+            SecurityFinding(
+                severity=SecuritySeverity.CRITICAL,
+                category="parse_error",
+                message=f"Failed to parse configuration for security audit: {err}",
+                remediation="Fix syntax errors in config.toml.",
+                auto_fixable=False,
+            )
+        )
+
+    return findings
+
+
+def remediate_config_security(path: Path | str = CONFIG_PATH) -> list[str]:
+    """Automatically correct unsafe configuration directory and file permissions.
+
+    Returns:
+        List of descriptions for remediations applied.
+    """
+    actions: list[str] = []
+    cfg_file = Path(path)
+    cfg_dir = cfg_file.parent
+
+    if cfg_dir.exists():
+        mode = cfg_dir.stat().st_mode & 0o777
+        if mode != 0o700:
+            with contextlib.suppress(OSError):
+                os.chmod(cfg_dir, 0o700)
+                actions.append(
+                    f"Restricted directory permissions on {cfg_dir} from {oct(mode)} to 0700."
+                )
+
+    if cfg_file.exists():
+        file_mode = cfg_file.stat().st_mode & 0o777
+        if file_mode != 0o600:
+            with contextlib.suppress(OSError):
+                os.chmod(cfg_file, 0o600)
+                actions.append(
+                    f"Restricted file permissions on {cfg_file} from {oct(file_mode)} to 0600."
+                )
+
+    return actions

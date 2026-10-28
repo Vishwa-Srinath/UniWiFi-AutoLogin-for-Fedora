@@ -48,3 +48,7 @@ scrape_hidden_fields = true
 
 # Verify SSL/TLS certificates when submitting credentials
 verify_tls = true
+
+# Disallow insecure plain HTTP for login form submission (enforces HTTPS to prevent Wi-Fi eavesdropping)
+allow_insecure_http = false
+
