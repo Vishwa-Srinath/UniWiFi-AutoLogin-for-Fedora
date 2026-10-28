@@ -173,12 +173,15 @@ class EventDebouncer:
         """Check if a debounced callback invocation is pending."""
         return self._task is not None and not self._task.done()
 
-    def trigger(self, event_data: Any = None) -> asyncio.Task[None]:
+    def trigger(
+        self, event_data: Any = None, payload: Any = None
+    ) -> asyncio.Task[None]:
         """Record an event and start/restart the debounce timer."""
-        self._last_event = event_data
+        data = payload if payload is not None else event_data
+        self._last_event = data
         if self._task and not self._task.done():
             self._task.cancel()
-        self._task = asyncio.create_task(self._wait_and_dispatch(event_data))
+        self._task = asyncio.create_task(self._wait_and_dispatch(data))
         return self._task
 
     async def _wait_and_dispatch(self, event_data: Any) -> None:
