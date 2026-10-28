@@ -345,6 +345,7 @@ def status(
         probe,
     )
     from .recon import get_active_wifi_connections
+    from .service import get_service_status
 
     check_url = DEFAULT_CHECK_URL
     check_expect = DEFAULT_CHECK_EXPECT
@@ -363,6 +364,7 @@ def status(
         check_url = probe_url
 
     active_conns = get_active_wifi_connections()
+    svc_status = get_service_status()
 
     result = probe(
         check_url=check_url,
@@ -375,6 +377,7 @@ def status(
         payload = {
             "active_wifi": [c.to_dict() for c in active_conns],
             "probe": result.to_dict(),
+            "service": svc_status.to_dict(),
         }
         typer.echo(json.dumps(payload, indent=2))
         if result.state == ConnectivityState.ONLINE:
@@ -395,6 +398,23 @@ def status(
 
     typer.echo(f"  Probe Target:   {check_url}")
     typer.echo(f"  Latency:        {result.latency_ms:.1f} ms")
+
+    if svc_status.installed:
+        svc_state_str = (
+            f"active ({svc_status.sub_state})"
+            if svc_status.is_active
+            else f"inactive ({svc_status.sub_state})"
+        )
+        color = typer.colors.GREEN if svc_status.is_active else typer.colors.YELLOW
+        typer.secho(
+            f"  Daemon Service: {svc_state_str} [enabled: {svc_status.is_enabled}]",
+            fg=color,
+        )
+    else:
+        typer.secho(
+            "  Daemon Service: not installed (run 'uniwifi service install')",
+            fg=typer.colors.YELLOW,
+        )
 
     if result.state == ConnectivityState.ONLINE:
         typer.secho("\nStatus: ONLINE", bold=True, fg=typer.colors.GREEN)
@@ -708,6 +728,17 @@ def run(
         except Exception as err:
             typer.secho(f"✗ Execution error: {err}", fg=typer.colors.RED)
             raise typer.Exit(1) from err
+
+    try:
+        from .service import is_service_active
+
+        if is_service_active():
+            typer.secho(
+                "Notice: uniwifi systemd user service is currently active in the background.",
+                fg=typer.colors.YELLOW,
+            )
+    except Exception:
+        pass
 
     typer.echo("Starting UniWiFi daemon service (press Ctrl+C to stop)...")
     try:
@@ -1068,6 +1099,309 @@ def events(
     except KeyboardInterrupt:
         if not json_output:
             typer.echo("\nStopped listening for events.")
+
+
+service_app = typer.Typer(
+    name="service",
+    help="Manage the uniwifi systemd user service unit.",
+    no_args_is_help=True,
+)
+app.add_typer(service_app, name="service")
+
+
+@service_app.command("install")
+def service_install(
+    enable: bool = typer.Option(
+        True,
+        "--enable/--no-enable",
+        help="Enable service to start on user session login.",
+    ),
+    now: bool = typer.Option(
+        False,
+        "--now",
+        help="Start service immediately after installation.",
+    ),
+    exec_path: str | None = typer.Option(
+        None,
+        "--exec-path",
+        help="Explicit path to uniwifi executable.",
+    ),
+    no_hardening: bool = typer.Option(
+        False,
+        "--no-hardening",
+        help="Omit systemd sandboxing directives.",
+    ),
+) -> None:
+    """Install uniwifi.service into ~/.config/systemd/user/."""
+    from .service import ServiceError, daemon_reload, enable_service, install_service
+
+    try:
+        path = install_service(
+            exec_path=exec_path,
+            hardening=not no_hardening,
+            overwrite=True,
+        )
+        typer.secho(
+            f"✓ Installed systemd user unit to {path}",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+        daemon_reload()
+        if enable:
+            enable_service(now=now)
+            action = "enabled and started" if now else "enabled"
+            typer.secho(f"✓ Service {action} successfully.", fg=typer.colors.GREEN)
+        typer.echo("\nUseful commands:")
+        typer.echo("  uniwifi service status        # Check service status")
+        typer.echo("  uniwifi service logs          # View live journal logs")
+        typer.echo("  systemctl --user status uniwifi")
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to install service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("uninstall")
+def service_uninstall(
+    stop: bool = typer.Option(
+        True,
+        "--stop/--no-stop",
+        help="Stop and disable service before deleting unit file.",
+    ),
+) -> None:
+    """Uninstall uniwifi.service from ~/.config/systemd/user/."""
+    from .service import (
+        ServiceError,
+        daemon_reload,
+        disable_service,
+        is_service_installed,
+        uninstall_service,
+    )
+
+    if not is_service_installed():
+        typer.secho("ℹ Service unit is not installed.", fg=typer.colors.YELLOW)
+        raise typer.Exit(0)
+
+    try:
+        if stop:
+            with contextlib.suppress(ServiceError):
+                disable_service(now=True)
+        removed = uninstall_service()
+        if removed:
+            daemon_reload()
+            typer.secho(
+                "✓ Uninstalled uniwifi systemd user service.",
+                fg=typer.colors.GREEN,
+            )
+        else:
+            typer.secho("ℹ Service unit not found.", fg=typer.colors.YELLOW)
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to uninstall service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("status")
+def service_status_cmd(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output service status in JSON format.",
+    ),
+) -> None:
+    """Inspect current operational status of the uniwifi user service."""
+    import json
+
+    from .service import get_service_status
+
+    status = get_service_status()
+
+    if json_output:
+        typer.echo(json.dumps(status.to_dict(), indent=2))
+        return
+
+    typer.secho("UniWiFi Systemd User Service Status", bold=True)
+    typer.echo(f"  Unit File:   {status.unit_path}")
+    if not status.installed:
+        typer.secho(
+            "  Installed:   No (run 'uniwifi service install')",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    typer.echo("  Installed:   Yes")
+    typer.echo(f"  Load State:  {status.load_state}")
+
+    if status.is_enabled:
+        typer.secho(f"  Unit State:  {status.unit_file_state}", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"  Unit State:  {status.unit_file_state}", fg=typer.colors.YELLOW)
+
+    if status.is_active:
+        typer.secho(
+            f"  Active:      {status.active_state} ({status.sub_state})",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+    else:
+        typer.secho(
+            f"  Active:      {status.active_state} ({status.sub_state})",
+            fg=typer.colors.RED,
+        )
+
+    if status.main_pid:
+        typer.echo(f"  Main PID:    {status.main_pid}")
+    if status.memory_bytes:
+        mem_mb = status.memory_bytes / (1024 * 1024)
+        typer.echo(f"  Memory:      {mem_mb:.1f} MB")
+    if status.active_enter_timestamp:
+        typer.echo(f"  Active Since:{status.active_enter_timestamp}")
+
+
+@service_app.command("cat")
+def service_cat() -> None:
+    """Print the contents of the installed uniwifi.service unit file."""
+    from .service import ServiceNotInstalledError, read_service_unit
+
+    try:
+        content = read_service_unit()
+        typer.echo(content)
+    except ServiceNotInstalledError as err:
+        typer.secho(f"✗ {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("start")
+def service_start() -> None:
+    """Start uniwifi.service via systemctl --user start."""
+    from .service import ServiceError, is_service_installed, start_service
+
+    if not is_service_installed():
+        typer.secho(
+            "✗ Service unit not installed. Run 'uniwifi service install'.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    try:
+        start_service()
+        typer.secho("✓ Started uniwifi systemd user service.", fg=typer.colors.GREEN)
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to start service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("stop")
+def service_stop() -> None:
+    """Stop uniwifi.service via systemctl --user stop."""
+    from .service import ServiceError, is_service_installed, stop_service
+
+    if not is_service_installed():
+        typer.secho("✗ Service unit not installed.", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    try:
+        stop_service()
+        typer.secho("✓ Stopped uniwifi systemd user service.", fg=typer.colors.GREEN)
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to stop service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("restart")
+def service_restart() -> None:
+    """Restart uniwifi.service via systemctl --user restart."""
+    from .service import ServiceError, is_service_installed, restart_service
+
+    if not is_service_installed():
+        typer.secho(
+            "✗ Service unit not installed. Run 'uniwifi service install'.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    try:
+        restart_service()
+        typer.secho("✓ Restarted uniwifi systemd user service.", fg=typer.colors.GREEN)
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to restart service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("enable")
+def service_enable_cmd(
+    now: bool = typer.Option(
+        False,
+        "--now",
+        help="Start service immediately after enabling.",
+    ),
+) -> None:
+    """Enable uniwifi.service to start on user session login."""
+    from .service import ServiceError, enable_service, is_service_installed
+
+    if not is_service_installed():
+        typer.secho(
+            "✗ Service unit not installed. Run 'uniwifi service install'.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    try:
+        enable_service(now=now)
+        action = "enabled and started" if now else "enabled"
+        typer.secho(f"✓ Service {action} successfully.", fg=typer.colors.GREEN)
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to enable service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("disable")
+def service_disable_cmd(
+    now: bool = typer.Option(
+        False,
+        "--now",
+        help="Stop service immediately after disabling.",
+    ),
+) -> None:
+    """Disable uniwifi.service from starting on user session login."""
+    from .service import ServiceError, disable_service, is_service_installed
+
+    if not is_service_installed():
+        typer.secho("✗ Service unit not installed.", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    try:
+        disable_service(now=now)
+        action = "disabled and stopped" if now else "disabled"
+        typer.secho(f"✓ Service {action} successfully.", fg=typer.colors.GREEN)
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to disable service: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
+
+
+@service_app.command("logs")
+def service_logs_cmd(
+    lines: int = typer.Option(
+        50,
+        "--lines",
+        "-n",
+        help="Number of journal log lines to display.",
+    ),
+    reverse: bool = typer.Option(
+        False,
+        "--reverse",
+        "-r",
+        help="Display newest entries first.",
+    ),
+) -> None:
+    """View journald logs for uniwifi systemd user service."""
+    from .service import ServiceError, get_service_logs
+
+    try:
+        output = get_service_logs(lines=lines, reverse=reverse)
+        if output.strip():
+            typer.echo(output.rstrip())
+        else:
+            typer.secho(
+                "ℹ No journal log entries found for uniwifi.service.",
+                fg=typer.colors.YELLOW,
+            )
+    except ServiceError as err:
+        typer.secho(f"✗ Failed to retrieve service logs: {err}", fg=typer.colors.RED)
+        raise typer.Exit(1) from None
 
 
 if __name__ == "__main__":
