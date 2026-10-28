@@ -546,6 +546,17 @@ def login(
         "--dry-run",
         help="Inspect portal form and print submission payload without sending.",
     ),
+    use_browser: bool = typer.Option(
+        False,
+        "--browser",
+        "--js",
+        help="Use Playwright headless browser engine for JavaScript-rendered portal authentication.",
+    ),
+    url: str | None = typer.Option(
+        None,
+        "--url",
+        help="Target captive portal URL (overrides probe auto-detection and config).",
+    ),
     json_output: bool = typer.Option(
         False,
         "--json",
@@ -601,10 +612,10 @@ def login(
         raise typer.Exit(code=1)
 
     # 3. Check current connectivity unless --force is specified
-    portal_url: str | None = None
+    portal_url: str | None = url
     portal_html: str | None = None
 
-    if not force:
+    if not portal_url and not force:
         probe_res = probe(
             check_url=cfg.general.check_url,
             expect=cfg.general.check_expect,
@@ -683,7 +694,80 @@ def login(
                 typer.echo(f"  Form scraping warning: {e}")
         return
 
-    # 5. Submit credentials and verify
+    # 5. Handle --browser login if requested
+    if use_browser:
+        from .browser import (
+            BrowserLoginAdapter,
+            BrowserNotInstalledError,
+            is_playwright_available,
+        )
+
+        if not is_playwright_available():
+            typer.secho(
+                "\n✗ Playwright is not installed.",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+            typer.echo(
+                "  Install it via: pip install 'uniwifi[js]' && playwright install chromium"
+            )
+            raise typer.Exit(code=1)
+
+        typer.echo(
+            f"Submitting credentials via headless browser for {final_user} to {portal_url}..."
+        )
+        adapter = BrowserLoginAdapter(
+            headless=True,
+            timeout=30.0,
+        )
+        try:
+            b_res = asyncio.run(
+                adapter.login_async(
+                    portal_url=portal_url,
+                    username=final_user,
+                    password=final_pass,
+                    allowed_hosts=cfg.general.allowed_hosts,
+                    allow_insecure_http=cfg.portal.allow_insecure_http,
+                )
+            )
+        except (UntrustedHostError, InsecureSchemeError) as sec_err:
+            typer.secho(
+                f"\n✗ SECURITY ALERT: {sec_err}",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+            raise typer.Exit(code=1) from sec_err
+        except BrowserNotInstalledError as b_err:
+            typer.secho(f"\n✗ Browser error: {b_err}", fg=typer.colors.RED)
+            raise typer.Exit(code=1) from b_err
+        except Exception as b_err:
+            typer.secho(f"\n✗ Browser automation failed: {b_err}", fg=typer.colors.RED)
+            raise typer.Exit(code=1) from b_err
+
+        if not b_res.success:
+            typer.secho(
+                f"\n✗ Browser login failed: {b_res.error}",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+            if b_res.screenshot_path:
+                typer.echo(f"  Failure screenshot saved: {b_res.screenshot_path}")
+            raise typer.Exit(code=1)
+
+        if json_output:
+            typer.echo(json.dumps(b_res.to_dict(), indent=2))
+            return
+
+        typer.secho(
+            "\n✓ Authenticated successfully via browser!",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+        typer.echo(f"  Portal:  {b_res.landing_url}")
+        typer.echo(f"  Latency: {b_res.latency_ms:.1f} ms")
+        return
+
+    # 6. Submit credentials via HTTP scraping and verify
     typer.echo(f"Submitting credentials for {final_user} to {portal_url}...")
     try:
         res = asyncio.run(
@@ -1177,6 +1261,327 @@ def events(
     except KeyboardInterrupt:
         if not json_output:
             typer.echo("\nStopped listening for events.")
+
+
+@app.command()
+def doctor(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Output doctor diagnostic report as JSON.",
+    ),
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Automatically remediate fixable issues (e.g. insecure config file permissions).",
+    ),
+) -> None:
+    """Run comprehensive system diagnostics across keyring, D-Bus, systemd, and config."""
+    import json
+    import platform
+    import sys
+    from typing import Any
+
+    from .browser import is_playwright_available
+    from .config import (
+        Config,
+        SecuritySeverity,
+        audit_config_security,
+        load,
+        remediate_config_security,
+    )
+    from .credentials import check_keyring_backend, exists, get_username
+    from .events import inspect_system_dbus_sync
+    from .notify import is_desktop_session, is_notify_available
+    from .service import get_service_status, is_service_installed
+
+    checks: dict[str, Any] = {}
+    issues: list[dict[str, str]] = []
+
+    # 1. Environment
+    python_ver = sys.version.split()[0]
+    checks["environment"] = {
+        "python_version": python_ver,
+        "uniwifi_version": __version__,
+        "platform": platform.platform(),
+        "os_name": platform.system(),
+    }
+
+    # 2. Keyring & Credentials
+    kr = check_keyring_backend()
+    cred_exists = exists()
+    cred_user = get_username() if cred_exists else None
+    checks["keyring"] = {
+        "backend": kr.backend_name,
+        "is_usable": kr.is_usable,
+        "is_encrypted": kr.is_encrypted,
+        "credentials_saved": cred_exists,
+        "username": cred_user,
+        "message": kr.message,
+    }
+    if not kr.is_usable:
+        issues.append(
+            {
+                "severity": "CRITICAL",
+                "component": "keyring",
+                "message": f"Keyring backend '{kr.backend_name}' is unusable: {kr.message}",
+            }
+        )
+    elif not kr.is_encrypted:
+        issues.append(
+            {
+                "severity": "WARNING",
+                "component": "keyring",
+                "message": "Keyring backend does not support hardware or master password encryption.",
+            }
+        )
+    if not cred_exists:
+        issues.append(
+            {
+                "severity": "WARNING",
+                "component": "credentials",
+                "message": "No credentials stored in keyring. Run `uniwifi setup`.",
+            }
+        )
+
+    # 3. Config & Security Audit
+    config_found = CONFIG_PATH.exists()
+    findings = audit_config_security(CONFIG_PATH) if config_found else []
+    remediated: list[str] = []
+    if fix and findings:
+        remediated = remediate_config_security(CONFIG_PATH)
+        findings = audit_config_security(CONFIG_PATH)
+
+    cfg = Config()
+    if config_found:
+        with contextlib.suppress(Exception):
+            cfg = load(CONFIG_PATH, validate=False)
+
+    for f in findings:
+        sev = (
+            "CRITICAL"
+            if f.severity == SecuritySeverity.CRITICAL
+            else ("WARNING" if f.severity == SecuritySeverity.WARNING else "INFO")
+        )
+        issues.append({"severity": sev, "component": "config", "message": f.message})
+
+    checks["config"] = {
+        "path": str(CONFIG_PATH),
+        "exists": config_found,
+        "findings": [f.to_dict() for f in findings],
+        "remediated": remediated,
+        "allow_insecure_http": cfg.portal.allow_insecure_http,
+        "allowed_hosts": list(cfg.general.allowed_hosts),
+    }
+
+    # 4. D-Bus & NetworkManager
+    dbus_report: dict[str, Any] = {}
+    try:
+        dbus_report = inspect_system_dbus_sync()
+    except Exception as dbus_err:
+        dbus_report = {"connected": False, "error": str(dbus_err)}
+
+    checks["dbus"] = dbus_report
+    if not dbus_report.get("connected"):
+        issues.append(
+            {
+                "severity": "CRITICAL",
+                "component": "dbus",
+                "message": f"System D-Bus unreachable: {dbus_report.get('error', 'unknown error')}",
+            }
+        )
+    else:
+        nm_info = dbus_report.get("networkmanager", {})
+        if not nm_info.get("present"):
+            issues.append(
+                {
+                    "severity": "WARNING",
+                    "component": "networkmanager",
+                    "message": "NetworkManager D-Bus service is not responding.",
+                }
+            )
+
+    # 5. Desktop Notifications
+    desktop_sess = is_desktop_session()
+    notify_avail = is_notify_available()
+    checks["notifications"] = {
+        "desktop_session": desktop_sess,
+        "notify_available": notify_avail,
+    }
+    if not notify_avail:
+        issues.append(
+            {
+                "severity": "INFO",
+                "component": "notifications",
+                "message": "Desktop notification server or notify-send utility not found.",
+            }
+        )
+
+    # 6. Systemd User Service
+    svc_installed = is_service_installed()
+    svc_status = get_service_status()
+    checks["service"] = {
+        "installed": svc_installed,
+        "active_state": svc_status.active_state,
+        "sub_state": svc_status.sub_state,
+        "is_running": svc_status.is_active,
+        "is_enabled": svc_status.is_enabled,
+    }
+
+    # 7. Browser Engine
+    pw_avail = is_playwright_available()
+    checks["browser"] = {
+        "playwright_available": pw_avail,
+    }
+    if not pw_avail:
+        issues.append(
+            {
+                "severity": "INFO",
+                "component": "browser",
+                "message": "Playwright is not installed (optional, needed only for JS-rendered portals).",
+            }
+        )
+
+    # Overall Status Calculation
+    has_critical = any(i["severity"] == "CRITICAL" for i in issues)
+    has_warning = any(i["severity"] == "WARNING" for i in issues)
+    if has_critical:
+        overall = "unhealthy"
+    elif has_warning:
+        overall = "degraded"
+    else:
+        overall = "healthy"
+
+    report = {
+        "overall": overall,
+        "issues": issues,
+        "checks": checks,
+    }
+
+    if json_output:
+        typer.echo(json.dumps(report, indent=2))
+        if overall == "unhealthy":
+            raise typer.Exit(code=1)
+        return
+
+    # Terminal output
+    typer.secho(
+        "\n=== UniWiFi System Doctor Diagnostic ===", bold=True, fg=typer.colors.CYAN
+    )
+
+    # Environment
+    typer.secho("\n[Environment]", bold=True)
+    typer.echo(f"  Python:         {python_ver}")
+    typer.echo(f"  UniWiFi:        v{__version__}")
+    typer.echo(f"  Platform:       {checks['environment']['platform']}")
+
+    # Keyring
+    typer.secho("\n[Keyring & Credentials]", bold=True)
+    kr_status_str = "Usable" if kr.is_usable else "Unusable"
+    kr_enc_str = "Encrypted" if kr.is_encrypted else "Unencrypted"
+    kr_color = (
+        typer.colors.GREEN
+        if (kr.is_usable and kr.is_encrypted)
+        else (typer.colors.YELLOW if kr.is_usable else typer.colors.RED)
+    )
+    typer.secho(
+        f"  Backend:        {kr.backend_name} ({kr_status_str}, {kr_enc_str})",
+        fg=kr_color,
+    )
+    if cred_exists:
+        typer.secho(f"  Saved User:     {cred_user}", fg=typer.colors.GREEN)
+    else:
+        typer.secho(
+            "  Saved User:     None (run `uniwifi setup`)", fg=typer.colors.YELLOW
+        )
+
+    # Config
+    typer.secho("\n[Configuration & Security]", bold=True)
+    if config_found:
+        typer.echo(f"  Config Path:    {CONFIG_PATH}")
+        if findings:
+            for f in findings:
+                f_color = (
+                    typer.colors.RED
+                    if f.severity == SecuritySeverity.CRITICAL
+                    else typer.colors.YELLOW
+                )
+                typer.secho(f"  ! {f.severity.value}: {f.message}", fg=f_color)
+            if remediated:
+                for r in remediated:
+                    typer.secho(f"  ✓ Remediated: {r}", fg=typer.colors.GREEN)
+            elif not fix:
+                typer.echo(
+                    "  (Run `uniwifi doctor --fix` to remediate file permissions)"
+                )
+        else:
+            typer.secho(
+                "  Permissions:    Secure (0600 file, 0700 dir)", fg=typer.colors.GREEN
+            )
+        typer.echo(f"  Allowed Hosts:  {len(cfg.general.allowed_hosts)} pinned host(s)")
+        typer.echo(
+            f"  HTTPS Enforced: {'No (insecure override active)' if cfg.portal.allow_insecure_http else 'Yes'}"
+        )
+    else:
+        typer.secho(
+            f"  Config Path:    {CONFIG_PATH} (defaults in use)", fg=typer.colors.YELLOW
+        )
+
+    # D-Bus
+    typer.secho("\n[D-Bus & NetworkManager]", bold=True)
+    if dbus_report.get("connected"):
+        typer.secho("  System D-Bus:   Connected", fg=typer.colors.GREEN)
+        nm_ok = dbus_report.get("networkmanager", {}).get("present", False)
+        nm_color = typer.colors.GREEN if nm_ok else typer.colors.YELLOW
+        typer.secho(
+            f"  NetworkManager: {'Present' if nm_ok else 'Not found'}", fg=nm_color
+        )
+    else:
+        typer.secho("  System D-Bus:   Disconnected / Error", fg=typer.colors.RED)
+
+    # Service
+    typer.secho("\n[Systemd User Service]", bold=True)
+    svc_color = (
+        typer.colors.GREEN
+        if (svc_installed and svc_status.is_active)
+        else (typer.colors.YELLOW if svc_installed else typer.colors.WHITE)
+    )
+    typer.secho(f"  Installed:      {'Yes' if svc_installed else 'No'}", fg=svc_color)
+    if svc_installed:
+        typer.echo(
+            f"  State:          {svc_status.active_state} ({svc_status.sub_state})"
+        )
+        typer.echo(f"  Enabled:        {'Yes' if svc_status.is_enabled else 'No'}")
+
+    # Browser
+    typer.secho("\n[Browser Engine (JS Portals)]", bold=True)
+    pw_color = typer.colors.GREEN if pw_avail else typer.colors.WHITE
+    typer.secho(
+        f"  Playwright:     {'Available' if pw_avail else 'Not installed (optional)'}",
+        fg=pw_color,
+    )
+
+    # Summary
+    typer.echo("\n" + "=" * 42)
+    if overall == "healthy":
+        typer.secho(
+            "✓ System is healthy and ready for auto-login.",
+            fg=typer.colors.GREEN,
+            bold=True,
+        )
+    elif overall == "degraded":
+        typer.secho(
+            "! System is operational with warnings.",
+            fg=typer.colors.YELLOW,
+            bold=True,
+        )
+    else:
+        typer.secho(
+            "✗ System has critical configuration or runtime errors.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
 
 
 service_app = typer.Typer(
