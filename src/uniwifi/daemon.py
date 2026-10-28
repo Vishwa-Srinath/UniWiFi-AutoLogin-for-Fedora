@@ -25,6 +25,7 @@ from .detector import UntrustedHostError
 from .events import DBusEvent, Events, EventType
 from .login import (
     AccountLockedError,
+    InsecureSchemeError,
     InvalidCredentialsError,
     LoginResult,
     login_and_verify_async,
@@ -271,13 +272,14 @@ def is_unrecoverable_error(exc: Exception | None) -> bool:
         return False
 
     from .detector import UntrustedHostError
-    from .login import AccountLockedError, InvalidCredentialsError
+    from .login import AccountLockedError, InsecureSchemeError, InvalidCredentialsError
 
     unrecoverable = (
         *UNRECOVERABLE_EXCEPTIONS,
         InvalidCredentialsError,
         AccountLockedError,
         UntrustedHostError,
+        InsecureSchemeError,
     )
     return isinstance(exc, unrecoverable)
 
@@ -531,6 +533,16 @@ class Daemon:
                 log.error("SECURITY ALERT: Untrusted portal host detected: %s", err)
                 if self.config.general.notify:
                     notify_untrusted_host(host=str(err))
+                raise
+            except InsecureSchemeError as err:
+                log.error(
+                    "SECURITY ALERT: Insecure HTTP portal login rejected: %s", err
+                )
+                if self.config.general.notify:
+                    notify_login_failed(
+                        reason="Insecure HTTP rejected. HTTPS is enforced for credential safety.",
+                        ssid=current_ssid,
+                    )
                 raise
             except (DaemonSSIDError, DaemonCredentialMissingError):
                 raise

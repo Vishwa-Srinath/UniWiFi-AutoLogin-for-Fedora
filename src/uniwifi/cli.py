@@ -487,6 +487,7 @@ def login(
     from .login import (
         AccountLockedError,
         AuthenticationFailedError,
+        InsecureSchemeError,
         InvalidCredentialsError,
         PortalFormNotFoundError,
         autodetect_login_form,
@@ -634,7 +635,7 @@ def login(
             bold=True,
         )
         raise typer.Exit(code=1) from err
-    except UntrustedHostError as err:
+    except (UntrustedHostError, InsecureSchemeError) as err:
         typer.secho(
             f"\n✗ SECURITY ALERT: {err}",
             fg=typer.colors.RED,

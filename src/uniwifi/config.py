@@ -58,6 +58,7 @@ class Portal:
     success_contains: str = ""
     scrape_hidden_fields: bool = True
     verify_tls: bool = True
+    allow_insecure_http: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert Portal settings to dictionary."""
@@ -124,6 +125,17 @@ def validate_config(config: Config) -> list[str]:
             errors.append(
                 f"portal.login_url: Must be a valid URL starting with http:// or https:// (got '{config.portal.login_url}')."
             )
+
+    if (
+        config.portal.login_url
+        and config.portal.login_url.startswith("http://")
+        and not config.portal.allow_insecure_http
+    ):
+        errors.append(
+            f"portal.login_url: Insecure HTTP is disallowed ('{config.portal.login_url}'). "
+            "To prevent transmitting credentials in plaintext over Wi-Fi, HTTPS is enforced. "
+            "Set portal.allow_insecure_http = true in config.toml to override."
+        )
 
     return errors
 
@@ -242,6 +254,8 @@ def generate_default_toml(
         'success_contains = ""\n'
         "scrape_hidden_fields = true\n"
         "verify_tls = true\n"
+        "# Set to true to permit plain HTTP login endpoints (defaults to false for security)\n"
+        "allow_insecure_http = false\n"
     )
 
 

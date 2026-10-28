@@ -7,6 +7,7 @@ and credential submission against campus captive portals.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -24,9 +25,15 @@ from .detector import (
     probe_async,
 )
 
+log = logging.getLogger("uniwifi.login")
+
 
 class LoginError(Exception):
     """Base error for captive portal authentication failures."""
+
+
+class InsecureSchemeError(LoginError):
+    """Raised when captive portal login endpoint uses unencrypted HTTP instead of HTTPS."""
 
 
 class InvalidCredentialsError(LoginError):
@@ -383,6 +390,26 @@ async def login_async(
             parsed_action = urlparse(action_url)
             raise UntrustedHostError(
                 f"Form action target '{parsed_action.hostname}' is not in allowed_hosts: {allowed_hosts}"
+            )
+
+        # 3b. Scheme security check (enforce HTTPS unless explicitly overridden)
+        parsed_action = urlparse(action_url)
+        if parsed_action.scheme.lower() != "https":
+            if not getattr(portal, "allow_insecure_http", False):
+                raise InsecureSchemeError(
+                    f"Captive portal endpoint '{action_url}' uses insecure HTTP. "
+                    "To prevent transmitting credentials in plaintext over unencrypted Wi-Fi, HTTPS is enforced. "
+                    "Set portal.allow_insecure_http = true in config.toml to override if necessary."
+                )
+            log.warning(
+                "SECURITY WARNING: Submitting credentials over unencrypted HTTP to '%s'.",
+                action_url,
+            )
+
+        if not portal.verify_tls:
+            log.warning(
+                "SECURITY WARNING: TLS verification is disabled for '%s'. Man-in-the-middle attacks possible.",
+                action_url,
             )
 
         # 4. Construct request headers
