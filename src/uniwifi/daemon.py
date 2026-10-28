@@ -103,6 +103,10 @@ class DaemonLockContentionError(DaemonError):
     """Raised when a single-flight login task is already executing."""
 
 
+class DaemonAuthLockedError(DaemonError):
+    """Raised when authentication is blocked to prevent account lockout after rejected credentials."""
+
+
 @dataclass
 class DaemonStatus:
     """Snapshot of daemon operational metrics and state."""
@@ -115,6 +119,7 @@ class DaemonStatus:
     failed_logins: int = 0
     current_ssid: str | None = None
     is_locked: bool = False
+    is_auth_locked: bool = False
     details: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -135,6 +140,7 @@ class DaemonStatus:
             "failed_logins": self.failed_logins,
             "current_ssid": self.current_ssid,
             "is_locked": self.is_locked,
+            "is_auth_locked": self.is_auth_locked,
             "details": self.details,
         }
 
@@ -263,6 +269,7 @@ def get_current_wifi_ssid() -> str | None:
 UNRECOVERABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
     DaemonSSIDError,
     DaemonCredentialMissingError,
+    DaemonAuthLockedError,
 )
 
 
@@ -362,6 +369,20 @@ class Daemon:
         self._debouncer: EventDebouncer | None = None
         self._events: Events | None = None
         self._stop_event: asyncio.Event = asyncio.Event()
+        self._auth_locked: bool = False
+        self._auth_lock_reason: str | None = None
+
+    @property
+    def is_auth_locked(self) -> bool:
+        """Return True if daemon has suspended logins due to credential rejection or lockout."""
+        return self._auth_locked
+
+    def reset_auth_lock(self) -> None:
+        """Reset the account lockout safeguard, allowing authentication cycles to resume."""
+        self._auth_locked = False
+        self._auth_lock_reason = None
+        self.status.is_auth_locked = False
+        log.info("Account lockout safeguard reset.")
 
     @property
     def state(self) -> DaemonState:
@@ -488,6 +509,16 @@ class Daemon:
         last_error: Exception | None = None
         current_ssid = self.status.current_ssid or get_current_wifi_ssid()
 
+        if self._auth_locked:
+            log.warning(
+                "Authentication cycle blocked by account lockout safeguard: %s",
+                self._auth_lock_reason,
+            )
+            raise DaemonAuthLockedError(
+                f"Authentication cycle suspended: {self._auth_lock_reason}. "
+                "Update credentials with 'uniwifi setup' to re-enable."
+            )
+
         for attempt in range(1, self.retry_policy.max_attempts + 1):
             try:
                 log.info(
@@ -508,8 +539,11 @@ class Daemon:
                 )
                 raise
             except AccountLockedError:
+                self._auth_locked = True
+                self._auth_lock_reason = "Account is locked out by network portal"
+                self.status.is_auth_locked = True
                 log.critical(
-                    "ACCOUNT LOCKED: Portal reports university account is locked out!"
+                    "ACCOUNT LOCKED: Portal reports university account is locked out! Halting subsequent attempts."
                 )
                 if self.config.general.notify:
                     notify_login_failed(
@@ -519,8 +553,11 @@ class Daemon:
                     )
                 raise
             except InvalidCredentialsError as err:
+                self._auth_locked = True
+                self._auth_lock_reason = "Login credentials rejected by captive portal"
+                self.status.is_auth_locked = True
                 log.error(
-                    "INVALID CREDENTIALS: Login credentials rejected by portal: %s",
+                    "INVALID CREDENTIALS: Login credentials rejected by portal: %s. Halting subsequent attempts.",
                     err,
                 )
                 if self.config.general.notify:
@@ -657,7 +694,13 @@ class Daemon:
             log.info("Debounced trigger ignored: SSID not authorized (%s)", err)
         except DaemonCredentialMissingError as err:
             log.error("Debounced trigger failed: missing credentials (%s)", err)
-        except (InvalidCredentialsError, AccountLockedError, UntrustedHostError) as err:
+        except (
+            InvalidCredentialsError,
+            AccountLockedError,
+            UntrustedHostError,
+            InsecureSchemeError,
+            DaemonAuthLockedError,
+        ) as err:
             log.error(
                 "Debounced trigger aborted due to unrecoverable condition: %s", err
             )

@@ -184,3 +184,92 @@ def test_cli_login_insecure_http_rejected() -> None:
     assert result.exit_code == 1
     assert "SECURITY ALERT" in result.stdout
     assert "uses insecure HTTP" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_daemon_account_lockout_safeguard_halts_further_attempts(
+    monkeypatch,
+) -> None:
+    """Verify Daemon immediately halts further authentication attempts when credentials are rejected."""
+    from unittest.mock import AsyncMock, patch
+
+    from uniwifi.daemon import Daemon, DaemonAuthLockedError
+    from uniwifi.login import InvalidCredentialsError
+
+    daemon = Daemon(
+        config=Config(general=General(ssids=["Campus-WiFi"], notify=False)),
+    )
+    monkeypatch.setattr("uniwifi.daemon.get_current_wifi_ssid", lambda: "Campus-WiFi")
+
+    with patch.object(
+        daemon,
+        "trigger_login",
+        new_callable=AsyncMock,
+        side_effect=InvalidCredentialsError("Invalid username or password"),
+    ) as mock_trigger:
+        with pytest.raises(InvalidCredentialsError):
+            await daemon.attempt_login_with_retry()
+
+        assert daemon.is_auth_locked is True
+        assert mock_trigger.call_count == 1
+
+        # Second attempt must immediately raise DaemonAuthLockedError without calling trigger_login again
+        with pytest.raises(DaemonAuthLockedError) as exc_info:
+            await daemon.attempt_login_with_retry()
+
+        assert "Authentication cycle suspended" in str(exc_info.value)
+        assert mock_trigger.call_count == 1  # Unchanged!
+
+    # Test reset_auth_lock restores daemon
+    daemon.reset_auth_lock()
+    assert daemon.is_auth_locked is False
+
+
+@pytest.mark.asyncio
+async def test_daemon_account_locked_error_triggers_lockout_safeguard(
+    monkeypatch,
+) -> None:
+    """Verify Daemon locks out when portal returns AccountLockedError."""
+    from unittest.mock import AsyncMock, patch
+
+    from uniwifi.daemon import Daemon, DaemonAuthLockedError
+    from uniwifi.login import AccountLockedError
+
+    notifications: list[dict] = []
+
+    def mock_notify(**kwargs):
+        notifications.append(kwargs)
+
+    monkeypatch.setattr("uniwifi.daemon.notify_login_failed", mock_notify)
+    monkeypatch.setattr("uniwifi.daemon.get_current_wifi_ssid", lambda: "Campus-WiFi")
+
+    daemon = Daemon(
+        config=Config(general=General(ssids=["Campus-WiFi"], notify=True)),
+    )
+
+    with (
+        patch.object(
+            daemon,
+            "trigger_login",
+            new_callable=AsyncMock,
+            side_effect=AccountLockedError("Account locked"),
+        ),
+        pytest.raises(AccountLockedError),
+    ):
+        await daemon.attempt_login_with_retry()
+
+    assert daemon.is_auth_locked is True
+    assert len(notifications) == 1
+    assert notifications[0].get("is_lockout") is True
+
+    # Subsequent attempt blocked
+    with pytest.raises(DaemonAuthLockedError):
+        await daemon.attempt_login_with_retry()
+
+
+def test_daemon_auth_locked_error_unrecoverable() -> None:
+    """Verify DaemonAuthLockedError is classified as unrecoverable."""
+    from uniwifi.daemon import DaemonAuthLockedError
+
+    err = DaemonAuthLockedError("Suspended")
+    assert is_unrecoverable_error(err) is True
