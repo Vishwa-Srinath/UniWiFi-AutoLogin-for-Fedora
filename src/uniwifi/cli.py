@@ -194,6 +194,17 @@ def config_cmd(
         "--json",
         help="Display configuration in JSON format.",
     ),
+    audit: bool = typer.Option(
+        False,
+        "--audit",
+        "-a",
+        help="Run comprehensive security audit on configuration and permissions.",
+    ),
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Automatically correct insecure permissions on config directory and file.",
+    ),
 ) -> None:
     """Inspect, validate, or initialize the uniwifi configuration file."""
     import json
@@ -201,13 +212,79 @@ def config_cmd(
 
     from .config import (
         ConfigError,
+        SecuritySeverity,
+        audit_config_security,
         init_default_config,
         load,
+        remediate_config_security,
         validate_config,
     )
 
     if show_path:
         typer.echo(str(CONFIG_PATH))
+        return
+
+    if fix:
+        actions = remediate_config_security(CONFIG_PATH)
+        if actions:
+            typer.secho(
+                "✓ Configuration security remediations applied:",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+            for act in actions:
+                typer.echo(f"  - {act}")
+        else:
+            typer.secho(
+                "✓ No remediation needed: Permissions are already secure (0700 dir, 0600 file).",
+                fg=typer.colors.GREEN,
+            )
+        return
+
+    if audit:
+        findings = audit_config_security(CONFIG_PATH)
+        if json_output:
+            typer.echo(json.dumps([f.to_dict() for f in findings], indent=2))
+        else:
+            typer.secho(
+                "\n=== UniWiFi Configuration Security Audit ===",
+                bold=True,
+                fg=typer.colors.CYAN,
+            )
+            typer.echo(f"  Config Path: {CONFIG_PATH}")
+            if not findings:
+                typer.secho(
+                    "\n✓ All security checks passed! No vulnerabilities detected.",
+                    fg=typer.colors.GREEN,
+                    bold=True,
+                )
+            else:
+                typer.echo(f"  Findings:    {len(findings)}")
+                for f in findings:
+                    color = (
+                        typer.colors.RED
+                        if f.severity == SecuritySeverity.CRITICAL
+                        else (
+                            typer.colors.YELLOW
+                            if f.severity == SecuritySeverity.WARNING
+                            else typer.colors.BLUE
+                        )
+                    )
+                    typer.secho(
+                        f"\n[{f.severity.upper()}] {f.category}: {f.message}",
+                        fg=color,
+                        bold=True,
+                    )
+                    if f.remediation:
+                        typer.echo(f"  -> Remediation: {f.remediation}")
+                        if f.auto_fixable:
+                            typer.echo(
+                                "     (Can be automatically fixed with `uniwifi config --fix`)"
+                            )
+
+        has_critical = any(f.severity == SecuritySeverity.CRITICAL for f in findings)
+        if has_critical:
+            raise typer.Exit(code=1)
         return
 
     if init:

@@ -196,3 +196,110 @@ def test_cli_config_init_and_show(
     res_json = runner.invoke(app, ["config", "--json"])
     assert res_json.exit_code == 0
     assert '"general"' in res_json.stdout
+
+
+def test_audit_config_security_missing_file(tmp_path: Path) -> None:
+    """Verify audit_config_security flags missing config file as CRITICAL."""
+    from uniwifi.config import SecuritySeverity, audit_config_security
+
+    missing = tmp_path / "nonexistent" / "config.toml"
+    findings = audit_config_security(missing)
+    assert any(
+        f.category == "file_missing" and f.severity == SecuritySeverity.CRITICAL
+        for f in findings
+    )
+
+
+def test_audit_config_security_permissions_and_remediation(tmp_path: Path) -> None:
+    """Verify audit flags unsafe file/dir permissions and remediate fixes them."""
+    import os
+
+    from uniwifi.config import (
+        SecuritySeverity,
+        audit_config_security,
+        init_default_config,
+        remediate_config_security,
+    )
+
+    cfg_dir = tmp_path / "insecure_config"
+    cfg_dir.mkdir(parents=True)
+
+    cfg_file = cfg_dir / "config.toml"
+    init_default_config(cfg_file)
+    os.chmod(cfg_dir, 0o777)
+    os.chmod(cfg_file, 0o666)  # world-writable
+
+    findings = audit_config_security(cfg_file)
+    assert any(
+        f.category == "file_permissions" and f.severity == SecuritySeverity.CRITICAL
+        for f in findings
+    )
+    assert any(
+        f.category == "dir_permissions" and f.severity == SecuritySeverity.WARNING
+        for f in findings
+    )
+
+    # Remediate
+    actions = remediate_config_security(cfg_file)
+    assert len(actions) == 2
+
+    assert (cfg_dir.stat().st_mode & 0o777) == 0o700
+    assert (cfg_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_audit_config_security_plaintext_password(tmp_path: Path) -> None:
+    """Verify audit flags plaintext password stored in config.toml."""
+    from uniwifi.config import SecuritySeverity, audit_config_security
+
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(
+        """
+        [general]
+        ssids = ["Campus"]
+        allowed_hosts = ["portal.univ.edu"]
+
+        [portal]
+        mode = "form"
+        username = "alice"
+        password = "supersecretpassword123"
+        """,
+        encoding="utf-8",
+    )
+
+    findings = audit_config_security(cfg_file)
+    assert any(
+        f.category == "plaintext_password" and f.severity == SecuritySeverity.CRITICAL
+        for f in findings
+    )
+
+
+def test_cli_config_audit_and_fix(tmp_path: Path, monkeypatch) -> None:
+    """Verify uniwifi config --audit and --fix CLI flags."""
+    import os
+
+    from typer.testing import CliRunner
+
+    import uniwifi.config
+    from uniwifi.cli import app
+
+    cfg_file = tmp_path / "config.toml"
+    uniwifi.config.init_default_config(cfg_file)
+    os.chmod(cfg_file, 0o644)
+
+    monkeypatch.setattr("uniwifi.cli.CONFIG_PATH", cfg_file)
+    runner = CliRunner()
+
+    # Audit reports findings
+    res_audit = runner.invoke(app, ["config", "--audit"])
+    assert "UniWiFi Configuration Security Audit" in res_audit.stdout
+    assert "file_permissions" in res_audit.stdout
+
+    # Audit JSON
+    res_audit_json = runner.invoke(app, ["config", "--audit", "--json"])
+    assert '"category": "file_permissions"' in res_audit_json.stdout
+
+    # Fix
+    res_fix = runner.invoke(app, ["config", "--fix"])
+    assert res_fix.exit_code == 0
+    assert "Configuration security remediations applied" in res_fix.stdout
+    assert (cfg_file.stat().st_mode & 0o777) == 0o600
