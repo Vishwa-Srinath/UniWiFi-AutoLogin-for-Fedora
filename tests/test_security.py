@@ -273,3 +273,26 @@ def test_daemon_auth_locked_error_unrecoverable() -> None:
 
     err = DaemonAuthLockedError("Suspended")
     assert is_unrecoverable_error(err) is True
+
+
+def test_pkg_exports_day_10_symbols() -> None:
+    """Verify all Day 10 security, browser, and audit symbols are exported in __all__."""
+    import uniwifi
+
+    expected_symbols = [
+        "InsecureSchemeError",
+        "BrowserError",
+        "BrowserLoginAdapter",
+        "BrowserLoginResult",
+        "BrowserLoginTimeoutError",
+        "BrowserNotInstalledError",
+        "is_playwright_available",
+        "SecurityFinding",
+        "SecuritySeverity",
+        "audit_config_security",
+        "remediate_config_security",
+        "DaemonAuthLockedError",
+    ]
+    for symbol in expected_symbols:
+        assert symbol in uniwifi.__all__, f"{symbol} missing from uniwifi.__all__"
+        assert hasattr(uniwifi, symbol), f"{symbol} missing attribute on uniwifi module"
