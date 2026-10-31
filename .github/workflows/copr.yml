@@ -1,0 +1,84 @@
+name: Fedora COPR Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      chroots:
+        description: 'Target Fedora Chroots'
+        required: false
+        default: 'fedora-40-x86_64 fedora-41-x86_64 fedora-rawhide-x86_64'
+
+jobs:
+  build-srpm:
+    name: Build & Verify SRPM
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    outputs:
+      srpm_path: ${{ steps.srpm.outputs.path }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          dnf install -y rpm-build rpmlint tar gzip
+
+      - name: Build SRPM
+        id: srpm
+        run: |
+          ./scripts/build_rpm.sh --srpm
+          SRPM_FILE=$(find dist/rpmbuild/SRPMS -name "*.src.rpm" | head -n 1)
+          echo "path=$SRPM_FILE" >> "$GITHUB_OUTPUT"
+          echo "Built SRPM: $SRPM_FILE"
+
+      - name: Upload SRPM Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-rpm
+          path: dist/rpmbuild/SRPMS/*.src.rpm
+
+  copr-build:
+    name: Submit to Fedora COPR
+    needs: build-srpm
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Download SRPM Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: source-rpm
+          path: artifacts/
+
+      - name: Install COPR CLI Tooling
+        run: |
+          dnf install -y copr-cli
+
+      - name: Configure COPR Credentials
+        env:
+          COPR_LOGIN: ${{ secrets.COPR_LOGIN }}
+          COPR_USERNAME: ${{ secrets.COPR_USERNAME }}
+          COPR_TOKEN: ${{ secrets.COPR_TOKEN }}
+          COPR_COPR_URL: ${{ secrets.COPR_COPR_URL || 'https://copr.fedorainfracloud.org' }}
+        run: |
+          if [ -n "$COPR_LOGIN" ] && [ -n "$COPR_TOKEN" ]; then
+            mkdir -p ~/.config
+            cat <<EOF > ~/.config/copr
+[copr-cli]
+login = $COPR_LOGIN
+username = $COPR_USERNAME
+token = $COPR_TOKEN
+copr_url = $COPR_COPR_URL
+EOF
+            chmod 0600 ~/.config/copr
+            SRPM_FILE=$(find artifacts -name "*.src.rpm" | head -n 1)
+            echo "Submitting $SRPM_FILE to COPR repository..."
+            copr-cli build-package uniwifi --srpm "$SRPM_FILE" --nowait || true
+          else
+            echo "COPR credentials not configured in secrets. Skipping automated submission."
+          fi
