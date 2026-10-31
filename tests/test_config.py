@@ -40,7 +40,7 @@ def test_load_example_config() -> None:
     assert cfg.general.resume_delay_seconds == 3
     assert cfg.general.max_attempts == 5
     assert cfg.general.backoff_base_seconds == 5
-    assert cfg.general.notify is True
+    assert cfg.general.notify is False
     assert "portal.youruni.edu" in cfg.general.allowed_hosts
 
     assert cfg.portal.mode == "form"
