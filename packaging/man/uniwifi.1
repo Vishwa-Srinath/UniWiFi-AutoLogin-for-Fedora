@@ -1,0 +1,113 @@
+.TH UNIWIFI 1 "October 2026" "uniwifi 0.1.0" "User Commands"
+.SH NAME
+uniwifi \- zero-touch captive portal auto-login background daemon for Fedora Linux
+.SH SYNOPSIS
+.B uniwifi
+[\fIOPTIONS\fR] \fICOMMAND\fR [\fIARGS\fR]...
+.SH DESCRIPTION
+.B uniwifi
+is an autonomous background daemon engineered for Fedora Linux that detects captive
+portals upon network connection, network interface flappings, or systemd-logind sleep/resume,
+and automatically submits credentials stored securely in the system keyring.
+.PP
+Passphrases and credentials are never stored on disk or logged; they are stored encrypted
+via the FreeDesktop Secret Service API (GNOME Keyring / libsecret).
+
+.SH COMMANDS
+.TP
+.B status \fR[\fB--json\fR] [\fB-v\fR]
+Checks current internet connectivity and prints captive portal redirection URL if intercepted.
+.TP
+.B setup \fR[\fB--check\fR] [\fB--delete\fR] [\fB-u \fIUSERNAME\fR]
+Interactively prompts for university username and password and stores them in the OS keyring.
+.TP
+.B login \fR[\fB--browser\fR] [\fB--url \fIURL\fR] [\fB--dry-run\fR] [\fB--password-stdin\fR]
+Performs an immediate one-shot login attempt against the captive portal.
+.TP
+.B run \fR[\fB--foreground\fR]
+Launches the long-running async daemon listening for D-Bus signals from NetworkManager and systemd-logind.
+.TP
+.B service \fISUBCOMMAND\fR
+Controls the systemd user service unit. Subcommands include:
+.RS
+.IP \(bu 2
+\fBinstall\fR: Installs the unit to ~/.config/systemd/user/uniwifi.service.
+.IP \(bu 2
+\fBuninstall\fR: Removes the user service unit.
+.IP \(bu 2
+\fBstatus\fR: Inspects active state and PID.
+.IP \(bu 2
+\fBstart\fR, \fBstop\fR, \fBrestart\fR: Controls service execution.
+.IP \(bu 2
+\fBenable\fR, \fBdisable\fR: Toggles auto-start upon user login.
+.IP \(bu 2
+\fBlogs\fR: Queries journalctl user logs.
+.IP \(bu 2
+\fBcat\fR: Displays installed unit file content.
+.RE
+.TP
+.B doctor \fR[\fB--json\fR] [\fB--fix\fR]
+Runs comprehensive diagnostic self-tests covering Python runtime, Secret Service keyring,
+system D-Bus, notification daemon, file permissions, and systemd service state.
+.TP
+.B config \fISUBCOMMAND\fR
+Manages the TOML configuration file. Subcommands include: \fBshow\fR, \fBinit\fR, \fBpath\fR, and \fBaudit\fR.
+.TP
+.B recon \fR[\fB--json\fR] [\fB--probe\fR]
+Performs network reconnaissance on active Wi-Fi adapters and extracts portal login form structures.
+.TP
+.B events \fR[\fB--timeout \fISECONDS\fR] [\fB--json\fR]
+Streams live system D-Bus signals from NetworkManager and systemd-logind for troubleshooting.
+.TP
+.B notify \fR[\fB--kind \fIKIND\fR] [\fB--title \fITITLE\fR] [\fB--body \fIBODY\fR]
+Sends a test desktop notification via libnotify.
+
+.SH OPTIONS
+.TP
+.B -v, --verbose
+Enable verbose debug output.
+.TP
+.B --version
+Print version and exit.
+.TP
+.B --help
+Show help message and exit.
+
+.SH FILES
+.TP
+.I ~/.config/uniwifi/config.toml
+Main user configuration file. Must have mode 0600.
+.TP
+.I ~/.config/systemd/user/uniwifi.service
+User systemd unit definition.
+.TP
+.I /usr/share/uniwifi/config.example.toml
+System default example configuration.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+General operational error or verification failure.
+.TP
+.B 2
+Configuration syntax or validation error.
+.TP
+.B 3
+Credentials missing or keyring inaccessible.
+.TP
+.B 4
+Security rejection (insecure HTTP or untrusted host).
+.TP
+.B 130
+Process terminated by SIGINT / KeyboardInterrupt.
+
+.SH SEE ALSO
+.BR uniwifi.toml (5),
+.BR systemctl (1),
+.BR NetworkManager (8),
+.BR gnome-keyring (1)
+.SH AUTHORS
+Written by Vishwa Srinath <vishwa@fedoraproject.org>.

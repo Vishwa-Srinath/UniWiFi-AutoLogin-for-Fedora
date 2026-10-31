@@ -93,3 +93,24 @@ def test_build_rpm_script_help_flag() -> None:
     assert "Usage:" in result.stdout
     assert "--srpm" in result.stdout
     assert "--binary" in result.stdout
+
+
+def test_man_pages_exist_and_valid() -> None:
+    """Verify man pages exist with proper roff/groff headers and section macros."""
+    man1 = PROJECT_ROOT / "packaging" / "man" / "uniwifi.1"
+    man5 = PROJECT_ROOT / "packaging" / "man" / "uniwifi.toml.5"
+
+    assert man1.is_file(), f"uniwifi.1 missing at {man1}"
+    assert man5.is_file(), f"uniwifi.toml.5 missing at {man5}"
+
+    content1 = man1.read_text(encoding="utf-8")
+    assert content1.startswith('.TH UNIWIFI 1 "October 2026"')
+    assert ".SH NAME" in content1
+    assert ".SH COMMANDS" in content1
+    assert ".SH EXIT STATUS" in content1
+
+    content5 = man5.read_text(encoding="utf-8")
+    assert content5.startswith('.TH UNIWIFI.TOML 5 "October 2026"')
+    assert ".SH NAME" in content5
+    assert ".SS [general]" in content5
+    assert ".SS [portal]" in content5
