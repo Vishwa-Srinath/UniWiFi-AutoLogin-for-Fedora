@@ -107,8 +107,16 @@ def setup(
         if status.troubleshooting:
             typer.secho(f"\n[!] Note: {status.troubleshooting}", fg=typer.colors.YELLOW)
 
-        if exists():
-            user = get_username() or "unknown"
+        has_creds = False
+        if status.is_usable:
+            with contextlib.suppress(Exception):
+                has_creds = exists()
+
+        if has_creds:
+            user = None
+            with contextlib.suppress(Exception):
+                user = get_username()
+            user = user or "unknown"
             typer.secho(
                 f"\n✓ Credentials stored for user: {user}",
                 fg=typer.colors.GREEN,
@@ -1309,8 +1317,12 @@ def doctor(
 
     # 2. Keyring & Credentials
     kr = check_keyring_backend()
-    cred_exists = exists()
-    cred_user = get_username() if cred_exists else None
+    cred_exists = False
+    cred_user = None
+    if kr.is_usable:
+        with contextlib.suppress(Exception):
+            cred_exists = exists()
+            cred_user = get_username() if cred_exists else None
     checks["keyring"] = {
         "backend": kr.backend_name,
         "is_usable": kr.is_usable,

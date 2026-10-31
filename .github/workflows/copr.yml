@@ -64,8 +64,9 @@ jobs:
           COPR_LOGIN: ${{ secrets.COPR_LOGIN }}
           COPR_USERNAME: ${{ secrets.COPR_USERNAME }}
           COPR_TOKEN: ${{ secrets.COPR_TOKEN }}
-          COPR_COPR_URL: ${{ secrets.COPR_COPR_URL || 'https://copr.fedorainfracloud.org' }}
+          COPR_COPR_URL: ${{ secrets.COPR_COPR_URL }}
         run: |
+          TARGET_COPR_URL="${COPR_COPR_URL:-https://copr.fedorainfracloud.org}"
           if [ -n "$COPR_LOGIN" ] && [ -n "$COPR_TOKEN" ]; then
             mkdir -p ~/.config
             cat <<EOF > ~/.config/copr
@@ -73,7 +74,7 @@ jobs:
 login = $COPR_LOGIN
 username = $COPR_USERNAME
 token = $COPR_TOKEN
-copr_url = $COPR_COPR_URL
+copr_url = $TARGET_COPR_URL
 EOF
             chmod 0600 ~/.config/copr
             SRPM_FILE=$(find artifacts -name "*.src.rpm" | head -n 1)
