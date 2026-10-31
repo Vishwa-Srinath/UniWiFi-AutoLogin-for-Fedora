@@ -1,0 +1,105 @@
+.TH UNIWIFI.TOML 5 "October 2026" "uniwifi 0.1.0" "File Formats"
+.SH NAME
+uniwifi.toml \- configuration file for the UniWiFi AutoLogin daemon
+.SH SYNOPSIS
+\fI~/.config/uniwifi/config.toml\fR
+.SH DESCRIPTION
+The \fBuniwifi.toml\fR file defines daemon polling parameters, Wi-Fi SSID allowlists,
+captive portal endpoint targets, and security policies for \fBuniwifi\fR(1).
+.PP
+The configuration file is formatted in TOML syntax. Permissions on this file must be strictly
+set to \fB0600\fR (\fIrw-------\fR); world-readable or group-readable permissions will be flagged
+by \fBuniwifi config audit\fR.
+
+.SH SECTIONS
+.SS [general]
+The general section controls network polling, SSID allowlisting, and retry behavior.
+.TP
+.B ssids
+Array of strings representing the wireless network SSIDs for which auto-login should be attempted.
+Example: \fBssids = ["Campus-WiFi", "eduroam-guest"]\fR
+.TP
+.B check_url
+The plain HTTP probe URL used to detect captive portal interception.
+Default: \fB"http://fedoraproject.org/static/hotspot.txt"\fR
+.TP
+.B check_expect
+Expected body content from \fBcheck_url\fR indicating genuine internet connectivity.
+Default: \fB"OK"\fR
+.TP
+.B probe_timeout
+Network probe HTTP request timeout in seconds.
+Default: \fB6.0\fR
+.TP
+.B max_attempts
+Maximum login retry attempts before backing off.
+Default: \fB4\fR
+.TP
+.B base_delay
+Initial exponential backoff delay in seconds.
+Default: \fB5.0\fR
+.TP
+.B max_delay
+Maximum exponential backoff delay in seconds.
+Default: \fB60.0\fR
+.TP
+.B notify
+Boolean indicating whether to dispatch desktop notifications on successful login.
+Default: \fBtrue\fR
+.TP
+.B notify_on_failure
+Boolean indicating whether to dispatch desktop notifications on authentication failure.
+Default: \fBtrue\fR
+
+.SS [portal]
+The portal section defines authentication modes and security constraints.
+.TP
+.B mode
+Authentication engine mode: \fB"form"\fR (HTML autodetection), \fB"custom"\fR (manual field mapping),
+or \fB"browser"\fR (headless Playwright browser).
+Default: \fB"form"\fR
+.TP
+.B allowed_hosts
+Array of trusted domain hostnames permitted for form action submission. Mitigates rogue access point
+phishing attacks.
+Example: \fBallowed_hosts = ["portal.campus.edu", "auth.university.edu"]\fR
+.TP
+.B allow_insecure_http
+Boolean indicating whether plain \fBhttp://\fR endpoints are permitted for credential submission.
+Default: \fBfalse\fR (HTTPS is strictly enforced).
+.TP
+.B login_url
+Explicit login action endpoint when \fBmode = "custom"\fR.
+.TP
+.B method
+HTTP method for credential submission (\fB"POST"\fR or \fB"GET"\fR).
+Default: \fB"POST"\fR
+.TP
+.B username_field
+Form field name for the username in custom mode.
+.TP
+.B password_field
+Form field name for the password in custom mode.
+
+.SH SECURITY CONSIDERATIONS
+Passwords are never stored in \fBuniwifi.toml\fR. They must always be stored in the OS keyring
+via \fBuniwifi setup\fR.
+
+.SH EXAMPLE
+.nf
+[general]
+ssids = ["Campus-WiFi"]
+check_url = "http://fedoraproject.org/static/hotspot.txt"
+check_expect = "OK"
+notify = true
+
+[portal]
+mode = "form"
+allowed_hosts = ["portal.campus.edu"]
+allow_insecure_http = false
+.fi
+
+.SH SEE ALSO
+.BR uniwifi (1)
+.SH AUTHORS
+Written by Vishwa Srinath <vishwa@fedoraproject.org>.

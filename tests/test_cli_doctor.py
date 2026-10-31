@@ -125,6 +125,8 @@ def test_doctor_fix_flag_remediates_permissions(tmp_path: Path, monkeypatch) -> 
         message="Active",
     )
     monkeypatch.setattr("uniwifi.credentials.check_keyring_backend", lambda: fake_kr)
+    monkeypatch.setattr("uniwifi.credentials.exists", lambda: True)
+    monkeypatch.setattr("uniwifi.credentials.get_username", lambda: "doctor_user")
     monkeypatch.setattr(
         "uniwifi.events.inspect_system_dbus_sync",
         lambda: {"connected": True, "networkmanager": {"present": True}},

@@ -1,0 +1,11 @@
+# Fedora COPR CLI API Configuration Example
+# Place in: ~/.config/copr
+# Secure permissions: chmod 0600 ~/.config/copr
+# Obtain tokens from: https://copr.fedorainfracloud.org/api/
+
+[copr-cli]
+login = YOUR_COPR_LOGIN_HASH
+username = YOUR_FEDORA_ACCOUNT_USERNAME
+token = YOUR_COPR_API_TOKEN
+copr_url = https://copr.fedorainfracloud.org
+# expiration_date = YYYY-MM-DD

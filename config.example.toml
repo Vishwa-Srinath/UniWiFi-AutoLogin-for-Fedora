@@ -22,7 +22,7 @@ max_attempts = 5
 backoff_base_seconds = 5
 
 # Send desktop notifications via libnotify (notify-send) on success or failure
-notify = true
+notify = false
 
 # Whitelist allowed portal hostnames to prevent Evil Twin / rogue redirect attacks
 allowed_hosts = ["portal.youruni.edu"]

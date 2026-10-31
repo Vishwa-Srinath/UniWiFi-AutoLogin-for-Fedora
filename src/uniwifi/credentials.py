@@ -82,7 +82,7 @@ def exists() -> bool:
             return False
         pw = keyring.get_password(SERVICE_NAME, user)
         return bool(pw)
-    except KeyringError:
+    except (KeyringError, CredentialError):
         return False
 
 

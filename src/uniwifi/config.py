@@ -68,7 +68,7 @@ class General:
     resume_delay_seconds: int = 3
     max_attempts: int = 5
     backoff_base_seconds: int = 5
-    notify: bool = True
+    notify: bool = False
     allowed_hosts: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -271,7 +271,7 @@ def generate_default_toml(
         "# Base interval in seconds for exponential backoff\n"
         "backoff_base_seconds = 5\n\n"
         "# Enable desktop notifications via notify-send\n"
-        "notify = true\n\n"
+        "notify = false\n\n"
         "# Whitelisted captive portal hosts to prevent Rogue AP credential theft\n"
         "allowed_hosts = []\n\n"
         "[portal]\n"
